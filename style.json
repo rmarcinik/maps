@@ -45,7 +45,7 @@
       ],
       "minzoom": 14,
       "paint": {
-        "line-color": "#1c1c1c",
+        "line-color": "#0d0d0d",
         "line-width": 0.5,
         "line-dasharray": [3, 2]
       }
@@ -58,7 +58,7 @@
       "filter": ["==", ["get", "class"], "service"],
       "minzoom": 13,
       "paint": {
-        "line-color": "#282828",
+        "line-color": "#141414",
         "line-width": ["interpolate", ["linear"], ["zoom"], 13, 0.3, 18, 1.5]
       }
     },
@@ -70,7 +70,7 @@
       "filter": ["==", ["get", "class"], "minor"],
       "minzoom": 12,
       "paint": {
-        "line-color": "#383838",
+        "line-color": "#202020",
         "line-width": [
           "interpolate",
           ["linear"],
