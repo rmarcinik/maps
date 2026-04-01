@@ -19,7 +19,7 @@
       "type": "fill",
       "source": "openmaptiles",
       "source-layer": "water",
-      "paint": { "fill-color": "#04040a" }
+      "paint": { "fill-color": "#000000" }
     },
     {
       "id": "waterway",
@@ -27,8 +27,8 @@
       "source": "openmaptiles",
       "source-layer": "waterway",
       "paint": {
-        "line-color": "#04040a",
-        "line-width": 0.5
+        "line-color": "#0d2d4a",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 10, 3, 14, 2, 18, 1]
       }
     },
     {
