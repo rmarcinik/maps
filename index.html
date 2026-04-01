@@ -153,10 +153,12 @@
                     layers: ["road-name-data"],
                 })) {
                     const name = f.properties.name;
+                    const type = f.geometry.type;
                     if (!name || next.has(name)) continue;
+                    if (type !== "LineString" && type !== "MultiLineString") continue;
                     next.set(
                         name,
-                        f.geometry.type === "LineString"
+                        type === "LineString"
                             ? [f.geometry.coordinates]
                             : f.geometry.coordinates,
                     );
