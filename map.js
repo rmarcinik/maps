@@ -1,5 +1,17 @@
 // --- Geometry helpers (pure) ---
 
+function segmentIntersection(p1, p2, e1, e2) {
+    const dx1 = p2.x - p1.x, dy1 = p2.y - p1.y;
+    const dx2 = e2.x - e1.x, dy2 = e2.y - e1.y;
+    const denom = dx1 * dy2 - dy1 * dx2;
+    if (Math.abs(denom) < 1e-10) return null;
+    const dx3 = e1.x - p1.x, dy3 = e1.y - p1.y;
+    const t = (dx3 * dy2 - dy3 * dx2) / denom;
+    const u = (dx3 * dy1 - dy3 * dx1) / denom;
+    if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+    return { x: p1.x + t * dx1, y: p1.y + t * dy1 };
+}
+
 function closestOnSegment(p1, p2, cx, cy) {
     const dx = p2.x - p1.x, dy = p2.y - p1.y;
     const len2 = dx * dx + dy * dy;
@@ -14,18 +26,22 @@ function snapAngle(angle) {
     return Math.round(angle / 45) * 45;
 }
 
-// For non-center streets: place at the endpoint nearest the preferred edge.
-// Vertical streets prefer the top endpoint (min y); if the top endpoint is
-// in the bottom half it means the street doesn't reach top, so fall back to bottom.
-// Horizontal streets prefer left, fall back to right.
-function preferredEndpoint(endpoints, angle, W, H) {
-    if (Math.abs(angle) >= 45) {
-        const sorted = [...endpoints].sort((a, b) => a.y - b.y);
-        return sorted[0].y < H / 2 ? sorted[0] : sorted[sorted.length - 1];
-    } else {
-        const sorted = [...endpoints].sort((a, b) => a.x - b.x);
-        return sorted[0].x < W / 2 ? sorted[0] : sorted[sorted.length - 1];
-    }
+function pointInRect(p, r) {
+    return p.x >= r.x1 && p.x <= r.x2 && p.y >= r.y1 && p.y <= r.y2;
+}
+
+function segmentRectIntersections(p1, p2, rect) {
+    const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI;
+    const edges = [
+        [{ x: rect.x1, y: rect.y1 }, { x: rect.x2, y: rect.y1 }],
+        [{ x: rect.x1, y: rect.y2 }, { x: rect.x2, y: rect.y2 }],
+        [{ x: rect.x1, y: rect.y1 }, { x: rect.x1, y: rect.y2 }],
+        [{ x: rect.x2, y: rect.y1 }, { x: rect.x2, y: rect.y2 }],
+    ];
+    return edges
+        .map(([e1, e2]) => segmentIntersection(p1, p2, e1, e2))
+        .filter(Boolean)
+        .map(pt => ({ ...pt, angle }));
 }
 
 // --- Label placement ---
@@ -34,47 +50,35 @@ function computeLabelPositions(map, streetCache) {
     const canvas = map.getCanvas();
     const W = canvas.clientWidth, H = canvas.clientHeight;
     const cx = W / 2, cy = H / 2;
+    const rect = { x1: W / 3, y1: H / 3, x2: 2 * W / 3, y2: 2 * H / 3 };
 
-    // Collect closest-to-center point and screen endpoints for each street
-    const streetData = new Map();
+    const positions = new Map(); // key → { x, y, angle, label }
+
     for (const [name, lines] of streetCache) {
+        const intersections = [];
         let closest = null;
-        const endpoints = [];
+        let anyInside = false;
+
         for (const line of lines) {
             const pts = line.map(c => map.project(c));
-            endpoints.push(pts[0], pts[pts.length - 1]);
             for (let i = 0; i < pts.length - 1; i++) {
-                const cp = closestOnSegment(pts[i], pts[i + 1], cx, cy);
+                const p1 = pts[i], p2 = pts[i + 1];
+                intersections.push(...segmentRectIntersections(p1, p2, rect));
+                if (!anyInside && (pointInRect(p1, rect) || pointInRect(p2, rect))) anyInside = true;
+                const cp = closestOnSegment(p1, p2, cx, cy);
                 if (!closest || cp.dist < closest.dist) closest = cp;
             }
         }
-        if (!closest) continue;
-        streetData.set(name, { closest, angle: snapAngle(closest.angle), endpoints, dist: closest.dist });
-    }
 
-    // Single centermost street
-    let centerName = null, minDist = Infinity;
-    for (const [name, { dist }] of streetData) {
-        if (dist < minDist) { minDist = dist; centerName = name; }
-    }
-
-    const positions = new Map();
-    for (const [name, { closest, angle, endpoints }] of streetData) {
-        let x, y;
-        if (name === centerName) {
-            // Offset slightly from center so the label isn't on top of the street
-            const abs = Math.abs(angle);
-            x = closest.x + (abs >= 45 ? -16 : 0);
-            y = closest.y + (abs <= 45 ?  16 : 0);
-        } else {
-            const pt = preferredEndpoint(endpoints, angle, W, H);
-            x = pt.x; y = pt.y;
+        if (intersections.length > 0) {
+            intersections.forEach((pt, i) =>
+                positions.set(`${name}\x00${i}`, { x: pt.x, y: pt.y, angle: snapAngle(pt.angle), label: name })
+            );
+        } else if (anyInside && closest) {
+            positions.set(name, { x: closest.x, y: closest.y, angle: snapAngle(closest.angle), label: name });
         }
-        const pad = 40;
-        x = Math.max(pad, Math.min(W - pad, x));
-        y = Math.max(pad, Math.min(H - pad, y));
-        positions.set(name, { x, y, angle });
     }
+
     return positions;
 }
 
@@ -85,16 +89,16 @@ function positionLabels(map, streetCache, labelEls, overlay) {
     }
     const positions = computeLabelPositions(map, streetCache);
     const visible = new Set();
-    for (const [name, { x, y, angle }] of positions) {
-        visible.add(name);
-        if (!labelEls.has(name)) {
+    for (const [key, { x, y, angle, label }] of positions) {
+        visible.add(key);
+        if (!labelEls.has(key)) {
             const el = document.createElement("div");
             el.className = "street-label";
-            el.textContent = name;
+            el.textContent = label;
             overlay.appendChild(el);
-            labelEls.set(name, el);
+            labelEls.set(key, el);
         }
-        const el = labelEls.get(name);
+        const el = labelEls.get(key);
         const abs = Math.abs(angle);
         const ox = abs >= 45 ? -8 : 0;
         const oy = abs <= 45 ?  8 : 0;
@@ -103,8 +107,8 @@ function positionLabels(map, streetCache, labelEls, overlay) {
         el.style.top = y + "px";
         el.style.transform = `translate(calc(-50% + ${ox}px), calc(-50% + ${oy}px)) rotate(${angle}deg)`;
     }
-    for (const [name, el] of labelEls) {
-        if (!visible.has(name)) el.style.display = "none";
+    for (const [key, el] of labelEls) {
+        if (!visible.has(key)) el.style.display = "none";
     }
 }
 
@@ -125,8 +129,8 @@ function refreshCache(map, streetCache, labelEls) {
         if (type !== "LineString" && type !== "MultiLineString") continue;
         next.set(name, type === "LineString" ? [f.geometry.coordinates] : f.geometry.coordinates);
     }
-    for (const [name, el] of labelEls) {
-        if (!next.has(name)) { el.remove(); labelEls.delete(name); }
+    for (const [key, el] of labelEls) {
+        if (!next.has(key.split("\x00")[0])) { el.remove(); labelEls.delete(key); }
     }
     return next;
 }
