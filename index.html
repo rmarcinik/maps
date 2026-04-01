@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>Maps</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.css">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      background: #000;
+      overflow: hidden;
+    }
+
+    #map {
+      width: 100%;
+      height: 100%;
+    }
+
+    /* Push controls above phone home bar */
+    .maplibregl-ctrl-bottom-right {
+      bottom: max(12px, env(safe-area-inset-bottom));
+      right: max(12px, env(safe-area-inset-right));
+    }
+
+    /* OLED-safe control styling */
+    .maplibregl-ctrl-group {
+      background: #111 !important;
+      border: 1px solid #333 !important;
+    }
+
+    .maplibregl-ctrl-group button {
+      background: #111 !important;
+      filter: invert(1);
+    }
+
+    .maplibregl-ctrl-attrib {
+      background: rgba(0,0,0,0.7) !important;
+      color: #555 !important;
+    }
+
+    .maplibregl-ctrl-attrib a {
+      color: #555 !important;
+    }
+
+    #edge-labels {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      overflow: hidden;
+    }
+
+    .edge-label {
+      position: absolute;
+      color: #ccc;
+      font: 10px/1 'system-ui', sans-serif;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+      transform-origin: center center;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="edge-labels"></div>
+  <script src="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.js"></script>
+  <script>
+    const map = new maplibregl.Map({
+      container: 'map',
+      style: 'style.json',
+      center: [0, 20],
+      zoom: 2,
+      attributionControl: { compact: true },
+      pitchWithRotate: false,
+    });
+
+    const geolocate = new maplibregl.GeolocateControl({
+      positionOptions: { enableHighAccuracy: true },
+      trackUserLocation: true,
+      showUserHeading: true,
+    });
+
+    map.addControl(geolocate, 'bottom-right');
+    map.on('load', () => geolocate.trigger());
+
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+
+    // --- Edge street labels ---
+
+    const overlay = document.getElementById('edge-labels');
+
+    // Find where segment p1→p2 crosses the viewport boundary [0,W]×[0,H].
+    // Returns crossing points with the angle of the segment (degrees).
+    function segmentCrossings(p1, p2, W, H) {
+      const dx = p2.x - p1.x;
+      const dy = p2.y - p1.y;
+      const crossings = [];
+
+      function check(t) {
+        if (t < 0 || t > 1) return;
+        const x = p1.x + t * dx;
+        const y = p1.y + t * dy;
+        if (x >= -1 && x <= W + 1 && y >= -1 && y <= H + 1) {
+          crossings.push({ x, y });
+        }
+      }
+
+      if (Math.abs(dx) > 0.001) { check(-p1.x / dx); check((W - p1.x) / dx); }
+      if (Math.abs(dy) > 0.001) { check(-p1.y / dy); check((H - p1.y) / dy); }
+      return crossings;
+    }
+
+    function isInside(p, W, H) {
+      return p.x >= 0 && p.x <= W && p.y >= 0 && p.y <= H;
+    }
+
+    function updateEdgeLabels() {
+      overlay.innerHTML = '';
+      if (map.getZoom() < 14) return;
+
+      const canvas = map.getCanvas();
+      const W = canvas.clientWidth;
+      const H = canvas.clientHeight;
+      const PAD = 24; // px from edge to label center
+
+      const features = map.queryRenderedFeatures({ layers: ['road-name-data'] });
+      const placed = new Map(); // name → [positions], for dedup
+
+      for (const f of features) {
+        const name = f.properties.name;
+        if (!name) continue;
+
+        const lines = f.geometry.type === 'LineString'
+          ? [f.geometry.coordinates]
+          : f.geometry.coordinates;
+
+        for (const line of lines) {
+          const pts = line.map(c => map.project(c));
+
+          for (let i = 0; i < pts.length - 1; i++) {
+            const p1 = pts[i], p2 = pts[i + 1];
+            if (isInside(p1, W, H) === isInside(p2, W, H)) continue;
+
+            for (const cross of segmentCrossings(p1, p2, W, H)) {
+              // Deduplicate: skip if same name placed within 60px
+              const prev = placed.get(name) || [];
+              if (prev.some(q => Math.hypot(q.x - cross.x, q.y - cross.y) < 60)) continue;
+              prev.push(cross);
+              placed.set(name, prev);
+
+              // Clamp label center just inside edge
+              const lx = Math.max(PAD, Math.min(W - PAD, cross.x));
+              const ly = Math.max(PAD, Math.min(H - PAD, cross.y));
+
+              // Angle: normalize so text reads left-to-right or downward
+              let angle = Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI;
+              if (angle > 90) angle -= 180;
+              if (angle < -90) angle += 180;
+
+              const el = document.createElement('div');
+              el.className = 'edge-label';
+              el.textContent = name;
+              el.style.left = lx + 'px';
+              el.style.top = ly + 'px';
+              el.style.transform = `translate(-50%, -50%) rotate(${angle}deg)`;
+              overlay.appendChild(el);
+            }
+          }
+        }
+      }
+    }
+
+    map.on('moveend', updateEdgeLabels);
+    map.on('zoomend', updateEdgeLabels);
+    map.on('load', updateEdgeLabels);
+  </script>
+</body>
+</html>
