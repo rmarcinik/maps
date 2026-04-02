@@ -172,32 +172,75 @@ function positionLabels(map, streetCache, labelEls, overlay, pinCtx) {
 
 // --- Route graph & pathfinding ---
 
-function buildRouteGraph(streetCache) {
-    const PREC = 1e4; // snap coords to ~10m to join intersections
-    const snap = n => Math.round(n * PREC) / PREC;
-    const key = c => `${snap(c[0])},${snap(c[1])}`;
-    const nodes = new Map(); // key → [lng, lat]
+// Build a planar graph by splitting every polyline at its intersections with
+// all other polylines. This ensures roads connect at crossings even when the
+// source features don't share endpoint coordinates.
+function buildRouteGraph(segments) {
+    // segments: [{pts: [[lng,lat],...], name}]
+
+    // 1. For every pair of polylines, find intersection points and record
+    //    which segment index (along each polyline) they fall on.
+    const cuts = segments.map(() => []); // cuts[i] = [{t, pt, j}] along polyline i
+
+    for (let i = 0; i < segments.length; i++) {
+        const A = segments[i].pts;
+        for (let j = i + 1; j < segments.length; j++) {
+            const B = segments[j].pts;
+            for (let ai = 0; ai < A.length - 1; ai++) {
+                for (let bj = 0; bj < B.length - 1; bj++) {
+                    // Segment-segment intersection in geographic space (small area, linear ok)
+                    const p1 = A[ai], p2 = A[ai + 1], p3 = B[bj], p4 = B[bj + 1];
+                    const dx1 = p2[0]-p1[0], dy1 = p2[1]-p1[1];
+                    const dx2 = p4[0]-p3[0], dy2 = p4[1]-p3[1];
+                    const denom = dx1*dy2 - dy1*dx2;
+                    if (Math.abs(denom) < 1e-12) continue;
+                    const dx3 = p3[0]-p1[0], dy3 = p3[1]-p1[1];
+                    const t = (dx3*dy2 - dy3*dx2) / denom;
+                    const u = (dx3*dy1 - dy3*dx1) / denom;
+                    if (t < 0 || t > 1 || u < 0 || u > 1) continue;
+                    const pt = [p1[0] + t*dx1, p1[1] + t*dy1];
+                    cuts[i].push({ segIdx: ai, t, pt });
+                    cuts[j].push({ segIdx: bj, t: u, pt });
+                }
+            }
+        }
+    }
+
+    // 2. Split each polyline at its cut points, producing a list of sub-segments.
+    const nodes = new Map(); // key → [lng,lat]
     const edges = new Map(); // key → [{to, dist, name}]
+    const PREC = 1e6;
+    const key = c => `${Math.round(c[0]*PREC)},${Math.round(c[1]*PREC)}`;
 
     const addEdge = (a, b, dist, name) => {
         if (!edges.has(a)) edges.set(a, []);
         edges.get(a).push({ to: b, dist, name });
     };
 
-    for (const [name, { lines }] of streetCache) {
-        for (const line of lines) {
-            for (let i = 0; i < line.length; i++) {
-                const k = key(line[i]);
-                if (!nodes.has(k)) nodes.set(k, line[i]);
-                if (i > 0) {
-                    const pk = key(line[i - 1]);
-                    const d = Math.hypot(line[i][0] - line[i-1][0], line[i][1] - line[i-1][1]);
-                    addEdge(pk, k, d, name);
-                    addEdge(k, pk, d, name);
-                }
-            }
+    const ensureNode = c => {
+        const k = key(c);
+        if (!nodes.has(k)) nodes.set(k, c);
+        return k;
+    };
+
+    for (let i = 0; i < segments.length; i++) {
+        const { pts, name } = segments[i];
+        // Build ordered list of (segIdx, t, pt) for all points along this polyline.
+        const chain = [];
+        for (let s = 0; s < pts.length; s++) chain.push({ segIdx: s, t: 0, pt: pts[s] });
+        for (const c of cuts[i]) chain.push(c);
+        chain.sort((a, b) => a.segIdx - b.segIdx || a.t - b.t);
+
+        for (let c = 0; c < chain.length - 1; c++) {
+            const ka = ensureNode(chain[c].pt);
+            const kb = ensureNode(chain[c + 1].pt);
+            if (ka === kb) continue;
+            const d = Math.hypot(chain[c].pt[0]-chain[c+1].pt[0], chain[c].pt[1]-chain[c+1].pt[1]);
+            addEdge(ka, kb, d, name);
+            addEdge(kb, ka, d, name);
         }
     }
+
     return { nodes, edges };
 }
 
@@ -250,25 +293,21 @@ function dijkstra(edges, startKey, endKey) {
 }
 
 function computeRoute(map, pin1, pin2) {
-    // Build graph from all rendered road features (not name-deduplicated streetCache).
-    // Key is `streetName_index` to avoid dedup while preserving name for label highlighting.
     const features = map.queryRenderedFeatures({ layers: ['road-name-data'] });
-    const segmentCache = new Map();
-    for (let i = 0; i < features.length; i++) {
-        const f = features[i];
+    const segments = [];
+    for (const f of features) {
         if (SKIP_CLASSES.has(f.properties.class)) continue;
         const type = f.geometry.type;
         const lines = type === 'LineString' ? [f.geometry.coordinates] : f.geometry.coordinates;
-        segmentCache.set(`${f.properties.name || ''}_${i}`, { lines, rank: 1 });
+        for (const pts of lines) segments.push({ pts, name: f.properties.name || '' });
     }
-    const { nodes, edges } = buildRouteGraph(segmentCache);
+    const { nodes, edges } = buildRouteGraph(segments);
     const start = nearestNode(nodes, pin1.lngLat);
     const end = nearestNode(nodes, pin2.lngLat);
     if (!start || !end) return null;
     const result = dijkstra(edges, start, end);
     if (!result) return null;
-    // Strip the _index suffix to recover street names for label highlighting.
-    const streets = new Set([...result.streets].map(k => k.replace(/_\d+$/, '')).filter(Boolean));
+    const streets = new Set([...result.streets].filter(Boolean));
     return { coords: result.keys.map(k => nodes.get(k)), streets };
 }
 
