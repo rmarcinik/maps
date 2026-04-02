@@ -226,6 +226,13 @@ function computeLabelPositions(map, streetCache, { pins = [], route = null } = {
         positions.set(name, { x, y, angle, label: name, opacity });
     }
 
+    // When a route is active, always show turn-intersection labels even if the
+    // street isn't in the cache (e.g. zoomed out past the label layer).
+    for (const [name, { x, y, angle }] of turnPts) {
+        if (!positions.has(name))
+            positions.set(name, { x, y, angle, label: name, opacity: 1 });
+    }
+
     return positions;
 }
 
