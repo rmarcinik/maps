@@ -58,6 +58,10 @@ function segmentRectIntersections(p1, p2, rect) {
 // --- Label placement ---
 
 const DIM = 0.2;
+const SKIP_CLASSES = new Set([
+    'path', 'track', 'footway', 'cycleway', 'steps', 'bridleway', 'pedestrian',
+    'path_construction', 'track_construction', 'footway_construction', 'cycleway_construction',
+]);
 
 function computeLabelPositions(map, streetCache) {
     const canvas = map.getCanvas();
@@ -92,19 +96,21 @@ function computeLabelPositions(map, streetCache) {
         const seen = new Set();
         const unique = intersections.filter(pt => {
             const eps = 0.5;
-            const edge =
+            pt.edge =
                 Math.abs(pt.x - rect.x1) < eps ? 'L' :
                 Math.abs(pt.x - rect.x2) < eps ? 'R' :
                 Math.abs(pt.y - rect.y1) < eps ? 'T' : 'B';
-            if (seen.has(edge)) return false;
-            seen.add(edge);
+            if (seen.has(pt.edge)) return false;
+            seen.add(pt.edge);
             return true;
         });
 
         if (unique.length > 0) {
-            unique.forEach((pt, i) =>
-                positions.set(name + "\x00" + i, { x: pt.x, y: pt.y, angle: snapAngle(pt.angle), label: name, opacity: 1 })
-            );
+            unique.forEach((pt, i) => {
+                const angle = snapAngle(pt.angle);
+                const opacity = Math.abs(angle) === 45 ? DIM : 1;
+                positions.set(name + "\x00" + i, { x: pt.x, y: pt.y, angle, label: name, opacity, edge: pt.edge });
+            });
         } else if (closest) {
             // Inside rect (short street) or entirely outside — full or dim opacity
             const opacity = anyInside ? 1 : DIM;
@@ -118,7 +124,8 @@ function computeLabelPositions(map, streetCache) {
 function positionLabels(map, streetCache, labelEls, overlay) {
     const positions = computeLabelPositions(map, streetCache);
     const visible = new Set();
-    for (const [key, { x, y, angle, label, opacity }] of positions) {
+    const ANCHOR = { L: '-100%,-50%', R: '0%,-50%', T: '-50%,-100%', B: '-50%,0%' };
+    for (const [key, { x, y, angle, label, opacity, edge }] of positions) {
         visible.add(key);
         if (!labelEls.has(key)) {
             const el = document.createElement("div");
@@ -128,13 +135,11 @@ function positionLabels(map, streetCache, labelEls, overlay) {
             labelEls.set(key, el);
         }
         const el = labelEls.get(key);
-        const abs = Math.abs(angle);
-        const ox = abs >= 45 ? -8 : 0;
-        const oy = abs <= 45 ?  8 : 0;
+        const [tx, ty] = (ANCHOR[edge] ?? '-50%,-50%').split(',');
         el.style.opacity = opacity;
         el.style.left = x + "px";
         el.style.top = y + "px";
-        el.style.transform = `translate(calc(-50% + ${ox}px), calc(-50% + ${oy}px)) rotate(${angle}deg)`;
+        el.style.transform = `translate(${tx}, ${ty}) rotate(${angle}deg)`;
     }
     // Stale entries have no valid current position — hide rather than dim
     for (const [key, el] of labelEls) {
@@ -157,6 +162,7 @@ function refreshCache(map, streetCache, labelEls) {
         const type = f.geometry.type;
         if (!name || next.has(name)) continue;
         if (type !== "LineString" && type !== "MultiLineString") continue;
+        if (SKIP_CLASSES.has(f.properties.class)) continue;
         next.set(name, type === "LineString" ? [f.geometry.coordinates] : f.geometry.coordinates);
     }
     for (const [key, el] of labelEls) {
