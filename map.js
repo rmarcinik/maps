@@ -249,14 +249,27 @@ function dijkstra(edges, startKey, endKey) {
     return { keys, streets };
 }
 
-function computeRoute(streetCache, pin1, pin2) {
-    const { nodes, edges } = buildRouteGraph(streetCache);
+function computeRoute(map, pin1, pin2) {
+    // Build graph from all rendered road features (not name-deduplicated streetCache).
+    // Key is `streetName_index` to avoid dedup while preserving name for label highlighting.
+    const features = map.queryRenderedFeatures({ layers: ['road-name-data'] });
+    const segmentCache = new Map();
+    for (let i = 0; i < features.length; i++) {
+        const f = features[i];
+        if (SKIP_CLASSES.has(f.properties.class)) continue;
+        const type = f.geometry.type;
+        const lines = type === 'LineString' ? [f.geometry.coordinates] : f.geometry.coordinates;
+        segmentCache.set(`${f.properties.name || ''}_${i}`, { lines, rank: 1 });
+    }
+    const { nodes, edges } = buildRouteGraph(segmentCache);
     const start = nearestNode(nodes, pin1.lngLat);
     const end = nearestNode(nodes, pin2.lngLat);
     if (!start || !end) return null;
     const result = dijkstra(edges, start, end);
     if (!result) return null;
-    return { coords: result.keys.map(k => nodes.get(k)), streets: result.streets };
+    // Strip the _index suffix to recover street names for label highlighting.
+    const streets = new Set([...result.streets].map(k => k.replace(/_\d+$/, '')).filter(Boolean));
+    return { coords: result.keys.map(k => nodes.get(k)), streets };
 }
 
 // --- Pin management ---
@@ -281,7 +294,7 @@ function placePinAt(lngLat) {
 
     routeStreets = new Set();
     if (pins.length === 2) {
-        const route = computeRoute(streetCache, pins[0], pins[1]);
+        const route = computeRoute(map, pins[0], pins[1]);
         routeStreets = route ? route.streets : new Set();
         updateRouteLayer(map, route ? route.coords : []);
     } else {
@@ -377,7 +390,7 @@ const pinCtx = () => ({ pins, routeStreets });
 const refresh = () => {
     streetCache = refreshCache(map, streetCache, labelEls);
     if (pins.length === 2) {
-        const route = computeRoute(streetCache, pins[0], pins[1]);
+        const route = computeRoute(map, pins[0], pins[1]);
         routeStreets = route ? route.streets : new Set();
         updateRouteLayer(map, route ? route.coords : []);
     }
