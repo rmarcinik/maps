@@ -13,6 +13,7 @@
 #   uv run test_labels.py "http://localhost:8080/#@41.9337355,-87.7022655,17.33z"
 
 import sys
+import argparse
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
 DIM = 0.2
@@ -57,7 +58,7 @@ def run(url):
             else:
                 hidden.append(text)
 
-        page.screenshot(path="test_screenshot.png")
+        page.screenshot(path="~/Downloads/test_screenshot.png")
         browser.close()
 
     total     = len(highlighted) + len(dimmed)
@@ -87,8 +88,92 @@ def run(url):
     return True
 
 
+def place_pin(page, x, y):
+    page.evaluate(f"""() => {{
+        const canvas = document.querySelector('#map canvas');
+        canvas.dispatchEvent(new MouseEvent('contextmenu', {{
+            bubbles: true, cancelable: true, clientX: {x}, clientY: {y}
+        }}));
+    }}""")
+    page.wait_for_selector("#context-menu:not([hidden])", timeout=3000)
+    page.click("#cm-place")
+    page.wait_for_timeout(300)
+
+
+def run_pins(url):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.goto(url)
+
+        try:
+            page.wait_for_function(
+                "() => [...document.querySelectorAll('.street-label')]"
+                "      .some(el => parseFloat(el.style.opacity) > 0)",
+                timeout=15_000,
+            )
+        except PlaywrightTimeout:
+            print("FAIL: map did not load in time")
+            browser.close()
+            return False
+
+        def pin_count():
+            return page.evaluate("() => document.querySelectorAll('.pin-marker').length")
+
+        def route_coords():
+            return page.evaluate(
+                "() => map.getSource('route').serialize().data.geometry.coordinates.length"
+            )
+
+        failures = []
+
+        # 1. Place first pin
+        place_pin(page, 400, 450)
+        if pin_count() != 1:
+            failures.append(f"after 1st pin: expected 1 pin, got {pin_count()}")
+
+        # 2. Place second pin — should produce a route
+        place_pin(page, 700, 450)
+        page.wait_for_timeout(800)
+        if pin_count() != 2:
+            failures.append(f"after 2nd pin: expected 2 pins, got {pin_count()}")
+        if route_coords() < 2:
+            failures.append(f"after 2nd pin: expected route coords, got {route_coords()}")
+
+        # 3. Place third pin — oldest should be dropped (still 2)
+        place_pin(page, 550, 300)
+        if pin_count() != 2:
+            failures.append(f"after 3rd pin (cycle): expected 2 pins, got {pin_count()}")
+
+        # 4. Clear pins
+        page.evaluate("""() => {
+            const canvas = document.querySelector('#map canvas');
+            canvas.dispatchEvent(new MouseEvent('contextmenu', {
+                bubbles: true, cancelable: true, clientX: 550, clientY: 300
+            }));
+        }""")
+        page.wait_for_selector("#context-menu:not([hidden])", timeout=3000)
+        page.click("#cm-clear")
+        page.wait_for_timeout(300)
+        if pin_count() != 0:
+            failures.append(f"after clear: expected 0 pins, got {pin_count()}")
+        if route_coords() != 0:
+            failures.append(f"after clear: expected empty route, got {route_coords()} coords")
+
+        page.screenshot(path="~/Downloads/test_screenshot_pins.png")
+        browser.close()
+
+    for f in failures:
+        print(f"FAIL: {f}")
+    if not failures:
+        print("PASS")
+    return not failures
+
+
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print(f"usage: uv run {sys.argv[0]} <url>")
-        sys.exit(1)
-    sys.exit(0 if run(sys.argv[1]) else 1)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("url")
+    parser.add_argument("--pins", action="store_true", help="run pin placement tests")
+    args = parser.parse_args()
+    fn = run_pins if args.pins else run
+    sys.exit(0 if fn(args.url) else 1)
