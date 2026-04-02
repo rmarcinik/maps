@@ -88,6 +88,23 @@ function streetRank(cls) {
     return ROAD_RANK[cls] ?? 8;
 }
 
+// Routing cost multipliers. Lower = prefer this class.
+// Highways get a large penalty so they're only used as a last resort.
+const CLASS_MULT = {
+    motorway: 8, motorway_construction: 8,
+    trunk: 5,    trunk_construction: 5,
+    primary: 0.5,   primary_construction: 0.5,
+    secondary: 0.7, secondary_construction: 0.7,
+    tertiary: 0.9,  tertiary_construction: 0.9,
+    minor: 1.1,
+    service: 1.4,
+};
+
+function classMult(cls) { return CLASS_MULT[cls] ?? 1.2; }
+
+// Penalty added per street change (~4 typical city-block lengths in degrees).
+const TURN_COST = 0.002;
+
 // Project all lines for a street to screen space (flat array of {x,y}).
 function projectLines(map, lines) {
     return lines.flatMap(line => line.map(c => map.project(c)));
@@ -257,18 +274,18 @@ function buildRouteGraph(segments) {
         return k;
     };
 
-    const addEdge = (ka, kb, a, b, name) => {
+    const addEdge = (ka, kb, a, b, name, cls) => {
         const dist = Math.hypot(b[0]-a[0], b[1]-a[1]);
         const b_fwd = bearing(a, b);
         const b_rev = bearing(b, a);
         if (!edges.has(ka)) edges.set(ka, []);
         if (!edges.has(kb)) edges.set(kb, []);
-        edges.get(ka).push({ to: kb, dist, name, bearing: b_fwd });
-        edges.get(kb).push({ to: ka, dist, name, bearing: b_rev });
+        edges.get(ka).push({ to: kb, dist, name, bearing: b_fwd, cls });
+        edges.get(kb).push({ to: ka, dist, name, bearing: b_rev, cls });
     };
 
     for (let i = 0; i < segments.length; i++) {
-        const { pts, name } = segments[i];
+        const { pts, name, cls } = segments[i];
         const chain = pts.map((pt, s) => ({ segIdx: s, t: 0, pt }));
         for (const c of cuts[i]) chain.push(c);
         chain.sort((a, b) => a.segIdx - b.segIdx || a.t - b.t);
@@ -276,7 +293,7 @@ function buildRouteGraph(segments) {
         for (let c = 0; c < chain.length - 1; c++) {
             const ka = ensureNode(chain[c].pt);
             const kb = ensureNode(chain[c+1].pt);
-            if (ka !== kb) addEdge(ka, kb, chain[c].pt, chain[c+1].pt, name);
+            if (ka !== kb) addEdge(ka, kb, chain[c].pt, chain[c+1].pt, name, cls);
         }
     }
 
@@ -294,12 +311,13 @@ function nearestNode(nodes, lngLat) {
 
 // Returns { keys, prevStreet, prevBearing } or null.
 function dijkstra(edges, startKey, endKey) {
-    const dist      = new Map([[startKey, 0]]);
-    const prev      = new Map();
+    const dist        = new Map([[startKey, 0]]);
+    const prev        = new Map();
     const prevStreet  = new Map();
     const prevBearing = new Map();
-    const visited   = new Set();
-    const queue     = [[0, startKey]];
+    const inStreet    = new Map([[startKey, '']]);
+    const visited     = new Set();
+    const queue       = [[0, startKey]];
 
     while (queue.length) {
         queue.sort((a, b) => a[0] - b[0]);
@@ -307,13 +325,16 @@ function dijkstra(edges, startKey, endKey) {
         if (visited.has(u)) continue;
         visited.add(u);
         if (u === endKey) break;
-        for (const { to, dist: w, name, bearing: b } of (edges.get(u) || [])) {
-            const nd = d + w;
+        const curStreet = inStreet.get(u);
+        for (const { to, dist: w, name, bearing: b, cls } of (edges.get(u) || [])) {
+            const turn = (curStreet && name !== curStreet) ? TURN_COST : 0;
+            const nd   = d + w * classMult(cls) + turn;
             if (!dist.has(to) || nd < dist.get(to)) {
                 dist.set(to, nd);
                 prev.set(to, u);
                 prevStreet.set(to, name);
                 prevBearing.set(to, b);
+                inStreet.set(to, name);
                 queue.push([nd, to]);
             }
         }
@@ -345,8 +366,9 @@ function computeRoute(map, pin1, pin2) {
     for (const f of features) {
         if (SKIP_CLASSES.has(f.properties.class)) continue;
         const type = f.geometry.type;
+        if (type !== 'LineString' && type !== 'MultiLineString') continue;
         const lines = type === 'LineString' ? [f.geometry.coordinates] : f.geometry.coordinates;
-        for (const pts of lines) segments.push({ pts, name: f.properties.name || '' });
+        for (const pts of lines) segments.push({ pts, name: f.properties.name || '', cls: f.properties.class });
     }
 
     const { nodes, edges } = buildRouteGraph(segments);
@@ -493,10 +515,6 @@ const ctx = () => ({ pins, route: activeRoute });
 
 const refresh = () => {
     streetCache = refreshCache(map, streetCache, labelEls);
-    if (pins.length === 2) {
-        activeRoute = computeRoute(map, pins[0], pins[1]);
-        updateRouteLayer(activeRoute?.coords ?? []);
-    }
     positionLabels(map, streetCache, labelEls, overlay, ctx());
 };
 

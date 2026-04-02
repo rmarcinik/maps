@@ -1,8 +1,7 @@
-const CACHE = 'map-tiles-v1';
+const CACHE = 'map-tiles-v2';
 
 const ORIGINS = [
   'https://tiles.openfreemap.org',
-  'https://fonts.openmaptiles.org',
 ];
 
 self.addEventListener('fetch', event => {
