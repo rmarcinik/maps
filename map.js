@@ -30,6 +30,17 @@ function pointInRect(p, r) {
     return p.x >= r.x1 && p.x <= r.x2 && p.y >= r.y1 && p.y <= r.y2;
 }
 
+// Extend a short label-anchor segment along its direction to span the full screen,
+// so we test whether the road's LINE crosses the inner rect, not just the anchor.
+function extendSegment(p1, p2, scale = 500) {
+    const cx = (p1.x + p2.x) / 2, cy = (p1.y + p2.y) / 2;
+    const dx = p2.x - p1.x, dy = p2.y - p1.y;
+    return [
+        { x: cx - dx * scale, y: cy - dy * scale },
+        { x: cx + dx * scale, y: cy + dy * scale },
+    ];
+}
+
 function segmentRectIntersections(p1, p2, rect) {
     const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI;
     const edges = [
@@ -46,13 +57,19 @@ function segmentRectIntersections(p1, p2, rect) {
 
 // --- Label placement ---
 
+const DIM = 0.2;
+
 function computeLabelPositions(map, streetCache) {
     const canvas = map.getCanvas();
     const W = canvas.clientWidth, H = canvas.clientHeight;
     const cx = W / 2, cy = H / 2;
-    const rect = { x1: W / 3, y1: H / 3, x2: 2 * W / 3, y2: 2 * H / 3 };
+    // Margin shrinks with zoom: 1/3 at z14 → 1/5 at z17+, so more streets are
+    // highlighted as you zoom in and the visible area shrinks to a few blocks.
+    const t = Math.max(0, Math.min(1, (map.getZoom() - 14) / 3));
+    const margin = 1/3 + t * (1/5 - 1/3);
+    const rect = { x1: W * margin, y1: H * margin, x2: W * (1 - margin), y2: H * (1 - margin) };
 
-    const positions = new Map(); // key → { x, y, angle, label }
+    const positions = new Map(); // key → { x, y, angle, label, opacity }
 
     for (const [name, lines] of streetCache) {
         const intersections = [];
@@ -63,19 +80,35 @@ function computeLabelPositions(map, streetCache) {
             const pts = line.map(c => map.project(c));
             for (let i = 0; i < pts.length - 1; i++) {
                 const p1 = pts[i], p2 = pts[i + 1];
-                intersections.push(...segmentRectIntersections(p1, p2, rect));
+                intersections.push(...segmentRectIntersections(...extendSegment(p1, p2), rect));
                 if (!anyInside && (pointInRect(p1, rect) || pointInRect(p2, rect))) anyInside = true;
                 const cp = closestOnSegment(p1, p2, cx, cy);
                 if (!closest || cp.dist < closest.dist) closest = cp;
             }
         }
 
-        if (intersections.length > 0) {
-            intersections.forEach((pt, i) =>
-                positions.set(`${name}\x00${i}`, { x: pt.x, y: pt.y, angle: snapAngle(pt.angle), label: name })
+        // Multiple extended anchor segments hit the same rect edge at slightly different
+        // points — deduplicate by keeping one intersection per edge (left/right/top/bottom).
+        const seen = new Set();
+        const unique = intersections.filter(pt => {
+            const eps = 0.5;
+            const edge =
+                Math.abs(pt.x - rect.x1) < eps ? 'L' :
+                Math.abs(pt.x - rect.x2) < eps ? 'R' :
+                Math.abs(pt.y - rect.y1) < eps ? 'T' : 'B';
+            if (seen.has(edge)) return false;
+            seen.add(edge);
+            return true;
+        });
+
+        if (unique.length > 0) {
+            unique.forEach((pt, i) =>
+                positions.set(name + "\x00" + i, { x: pt.x, y: pt.y, angle: snapAngle(pt.angle), label: name, opacity: 1 })
             );
-        } else if (anyInside && closest) {
-            positions.set(name, { x: closest.x, y: closest.y, angle: snapAngle(closest.angle), label: name });
+        } else if (closest) {
+            // Inside rect (short street) or entirely outside — full or dim opacity
+            const opacity = anyInside ? 1 : DIM;
+            positions.set(name, { x: closest.x, y: closest.y, angle: snapAngle(closest.angle), label: name, opacity });
         }
     }
 
@@ -83,13 +116,9 @@ function computeLabelPositions(map, streetCache) {
 }
 
 function positionLabels(map, streetCache, labelEls, overlay) {
-    if (map.getZoom() < 14) {
-        for (const el of labelEls.values()) el.style.display = "none";
-        return;
-    }
     const positions = computeLabelPositions(map, streetCache);
     const visible = new Set();
-    for (const [key, { x, y, angle, label }] of positions) {
+    for (const [key, { x, y, angle, label, opacity }] of positions) {
         visible.add(key);
         if (!labelEls.has(key)) {
             const el = document.createElement("div");
@@ -102,13 +131,14 @@ function positionLabels(map, streetCache, labelEls, overlay) {
         const abs = Math.abs(angle);
         const ox = abs >= 45 ? -8 : 0;
         const oy = abs <= 45 ?  8 : 0;
-        el.style.display = "";
+        el.style.opacity = opacity;
         el.style.left = x + "px";
         el.style.top = y + "px";
         el.style.transform = `translate(calc(-50% + ${ox}px), calc(-50% + ${oy}px)) rotate(${angle}deg)`;
     }
+    // Stale entries have no valid current position — hide rather than dim
     for (const [key, el] of labelEls) {
-        if (!visible.has(key)) el.style.display = "none";
+        if (!visible.has(key)) el.style.opacity = 0;
     }
 }
 
