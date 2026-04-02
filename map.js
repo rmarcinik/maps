@@ -26,96 +26,110 @@ function snapAngle(angle) {
     return Math.round(angle / 45) * 45;
 }
 
-function pointInRect(p, r) {
-    return p.x >= r.x1 && p.x <= r.x2 && p.y >= r.y1 && p.y <= r.y2;
+// Find the first intersection between two projected polylines (arrays of {x,y} points).
+// Returns the intersection point and the angle of the second polyline at that point, or null.
+function findPolylineIntersection(pts1, pts2) {
+    for (let i = 0; i < pts1.length - 1; i++) {
+        for (let j = 0; j < pts2.length - 1; j++) {
+            const pt = segmentIntersection(pts1[i], pts1[i + 1], pts2[j], pts2[j + 1]);
+            if (pt) {
+                const angle = Math.atan2(pts2[j + 1].y - pts2[j].y, pts2[j + 1].x - pts2[j].x) * 180 / Math.PI;
+                return { ...pt, angle };
+            }
+        }
+    }
+    return null;
 }
 
-// Extend a short label-anchor segment along its direction to span the full screen,
-// so we test whether the road's LINE crosses the inner rect, not just the anchor.
-function extendSegment(p1, p2, scale = 500) {
-    const cx = (p1.x + p2.x) / 2, cy = (p1.y + p2.y) / 2;
-    const dx = p2.x - p1.x, dy = p2.y - p1.y;
-    return [
-        { x: cx - dx * scale, y: cy - dy * scale },
-        { x: cx + dx * scale, y: cy + dy * scale },
-    ];
-}
+// --- Road hierarchy ---
 
-function segmentRectIntersections(p1, p2, rect) {
-    const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI;
-    const edges = [
-        [{ x: rect.x1, y: rect.y1 }, { x: rect.x2, y: rect.y1 }],
-        [{ x: rect.x1, y: rect.y2 }, { x: rect.x2, y: rect.y2 }],
-        [{ x: rect.x1, y: rect.y1 }, { x: rect.x1, y: rect.y2 }],
-        [{ x: rect.x2, y: rect.y1 }, { x: rect.x2, y: rect.y2 }],
-    ];
-    return edges
-        .map(([e1, e2]) => segmentIntersection(p1, p2, e1, e2))
-        .filter(Boolean)
-        .map(pt => ({ ...pt, angle }));
-}
-
-// --- Label placement ---
-
-const DIM = 0.2;
 const SKIP_CLASSES = new Set([
     'path', 'track', 'footway', 'cycleway', 'steps', 'bridleway', 'pedestrian',
     'path_construction', 'track_construction', 'footway_construction', 'cycleway_construction',
 ]);
 
-function computeLabelPositions(map, streetCache) {
+// Lower rank = more important. Roads not listed fall below service roads.
+const ROAD_RANK = {
+    motorway: 1, motorway_construction: 1,
+    trunk: 2,    trunk_construction: 2,
+    primary: 3,  primary_construction: 3,
+    secondary: 4, secondary_construction: 4,
+    tertiary: 5,  tertiary_construction: 5,
+    minor: 6,
+    service: 7,
+};
+
+function streetRank(cls) {
+    return ROAD_RANK[cls] ?? 8;
+}
+
+// Project all lines for a street to screen space (flat array of {x,y}).
+function projectLines(map, lines) {
+    return lines.flatMap(line => line.map(c => map.project(c)));
+}
+
+// --- Street intersection tree ---
+//
+// Each street is a node. Its label is placed at the intersection with its
+// highest-ranked (lowest rank number) neighbour that has already been placed.
+// Root nodes (no such neighbour) are labelled at the point closest to center.
+//
+// Returns Map<name, { pt: {x,y,angle} | null, rank, parentName: string | null }>
+function buildStreetTree(map, streetCache) {
     const canvas = map.getCanvas();
-    const W = canvas.clientWidth, H = canvas.clientHeight;
-    const cx = W / 2, cy = H / 2;
-    // Margin shrinks with zoom: 1/3 at z14 → 1/5 at z17+, so more streets are
-    // highlighted as you zoom in and the visible area shrinks to a few blocks.
-    const t = Math.max(0, Math.min(1, (map.getZoom() - 14) / 3));
-    const margin = 1/3 + t * (1/5 - 1/3);
-    const rect = { x1: W * margin, y1: H * margin, x2: W * (1 - margin), y2: H * (1 - margin) };
+    const cx = canvas.clientWidth / 2, cy = canvas.clientHeight / 2;
 
-    const positions = new Map(); // key → { x, y, angle, label, opacity }
+    // Project once, sort by rank ascending (most important first).
+    const streets = [...streetCache.entries()]
+        .map(([name, { lines, rank }]) => ({ name, rank, pts: projectLines(map, lines) }))
+        .sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
 
-    for (const [name, lines] of streetCache) {
-        const intersections = [];
+    const tree = new Map();   // name → node
+    const placed = [];        // streets whose labels are already decided (for intersection search)
+
+    for (const street of streets) {
+        // Find the closest-to-center point on this street for fallback / root placement.
         let closest = null;
-        let anyInside = false;
-
-        for (const line of lines) {
-            const pts = line.map(c => map.project(c));
-            for (let i = 0; i < pts.length - 1; i++) {
-                const p1 = pts[i], p2 = pts[i + 1];
-                intersections.push(...segmentRectIntersections(...extendSegment(p1, p2), rect));
-                if (!anyInside && (pointInRect(p1, rect) || pointInRect(p2, rect))) anyInside = true;
-                const cp = closestOnSegment(p1, p2, cx, cy);
-                if (!closest || cp.dist < closest.dist) closest = cp;
-            }
+        for (let i = 0; i < street.pts.length - 1; i++) {
+            const cp = closestOnSegment(street.pts[i], street.pts[i + 1], cx, cy);
+            if (!closest || cp.dist < closest.dist) closest = cp;
         }
 
-        // Multiple extended anchor segments hit the same rect edge at slightly different
-        // points — deduplicate by keeping one intersection per edge (left/right/top/bottom).
-        const seen = new Set();
-        const unique = intersections.filter(pt => {
-            const eps = 0.5;
-            pt.edge =
-                Math.abs(pt.x - rect.x1) < eps ? 'L' :
-                Math.abs(pt.x - rect.x2) < eps ? 'R' :
-                Math.abs(pt.y - rect.y1) < eps ? 'T' : 'B';
-            if (seen.has(pt.edge)) return false;
-            seen.add(pt.edge);
-            return true;
+        // Search already-placed streets for an intersection, preferring higher rank.
+        let parentName = null;
+        let intersectionPt = null;
+        for (const parent of placed) {
+            if (parent.rank >= street.rank) continue; // only attach to more important roads
+            const pt = findPolylineIntersection(street.pts, parent.pts);
+            if (pt) { parentName = parent.name; intersectionPt = pt; break; }
+        }
+
+        tree.set(street.name, {
+            rank: street.rank,
+            parentName,
+            // Intersection point if found, otherwise closest-to-center on self.
+            pt: intersectionPt ?? closest,
         });
+        placed.push(street);
+    }
 
-        if (unique.length > 0) {
-            unique.forEach((pt, i) => {
-                const angle = snapAngle(pt.angle);
-                const opacity = Math.abs(angle) === 45 ? DIM : 1;
-                positions.set(name + "\x00" + i, { x: pt.x, y: pt.y, angle, label: name, opacity, edge: pt.edge });
-            });
-        } else if (closest) {
-            // Inside rect (short street) or entirely outside — full or dim opacity
-            const opacity = anyInside ? 1 : DIM;
-            positions.set(name, { x: closest.x, y: closest.y, angle: snapAngle(closest.angle), label: name, opacity });
-        }
+    return tree;
+}
+
+// --- Label placement ---
+
+const DIM = 0.2;
+
+function computeLabelPositions(map, streetCache) {
+    const tree = buildStreetTree(map, streetCache);
+    const positions = new Map();
+
+    for (const [name, { rank, parentName, pt }] of tree) {
+        if (!pt) continue;
+        const angle = snapAngle(pt.angle);
+        // Root streets (no parent) are full opacity. Children dim with depth.
+        const opacity = parentName ? (rank <= 5 ? 1 : DIM) : 1;
+        positions.set(name, { x: pt.x, y: pt.y, angle, label: name, opacity });
     }
 
     return positions;
@@ -124,8 +138,7 @@ function computeLabelPositions(map, streetCache) {
 function positionLabels(map, streetCache, labelEls, overlay) {
     const positions = computeLabelPositions(map, streetCache);
     const visible = new Set();
-    const ANCHOR = { L: '-100%,-50%', R: '0%,-50%', T: '-50%,-100%', B: '-50%,0%' };
-    for (const [key, { x, y, angle, label, opacity, edge }] of positions) {
+    for (const [key, { x, y, angle, label, opacity }] of positions) {
         visible.add(key);
         if (!labelEls.has(key)) {
             const el = document.createElement("div");
@@ -135,13 +148,11 @@ function positionLabels(map, streetCache, labelEls, overlay) {
             labelEls.set(key, el);
         }
         const el = labelEls.get(key);
-        const [tx, ty] = (ANCHOR[edge] ?? '-50%,-50%').split(',');
         el.style.opacity = opacity;
         el.style.left = x + "px";
         el.style.top = y + "px";
-        el.style.transform = `translate(${tx}, ${ty}) rotate(${angle}deg)`;
+        el.style.transform = `translate(-50%, -50%) rotate(${angle}deg)`;
     }
-    // Stale entries have no valid current position — hide rather than dim
     for (const [key, el] of labelEls) {
         if (!visible.has(key)) el.style.opacity = 0;
     }
@@ -163,10 +174,11 @@ function refreshCache(map, streetCache, labelEls) {
         if (!name || next.has(name)) continue;
         if (type !== "LineString" && type !== "MultiLineString") continue;
         if (SKIP_CLASSES.has(f.properties.class)) continue;
-        next.set(name, type === "LineString" ? [f.geometry.coordinates] : f.geometry.coordinates);
+        const lines = type === "LineString" ? [f.geometry.coordinates] : f.geometry.coordinates;
+        next.set(name, { lines, rank: streetRank(f.properties.class) });
     }
     for (const [key, el] of labelEls) {
-        if (!next.has(key.split("\x00")[0])) { el.remove(); labelEls.delete(key); }
+        if (!next.has(key)) { el.remove(); labelEls.delete(key); }
     }
     return next;
 }
