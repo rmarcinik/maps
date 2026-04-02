@@ -162,17 +162,35 @@ function buildStreetTree(map, streetCache) {
 
 const DIM = 0.2;
 
+// Pixels to offset turn labels away from the path direction.
+const TURN_LABEL_OFFSET = 28;
+
 // Build a map of street name → screen-space label position derived from route turns.
 // When a street appears in multiple turns, keep the one with the largest |turnAngle|.
+// Labels are offset away from the direction of travel so they don't sit on the route line:
+//   fromStreet → offset in the direction of inBearing (behind the turn, along the street we came from)
+//   toStreet   → offset opposite outBearing (behind where we're going on the new street)
 function turnLabelPositions(map, turns) {
     const out = new Map(); // name → {x, y, angle}
+    const R = Math.PI / 180;
     for (const turn of turns) {
         const pt = map.project(turn.coord);
-        for (const [name, b] of [[turn.fromStreet, turn.inBearing], [turn.toStreet, turn.outBearing]]) {
+
+        // fromStreet: step in direction of inBearing (screen y is flipped vs lat)
+        const fx =  Math.cos(turn.inBearing  * R) * TURN_LABEL_OFFSET;
+        const fy = -Math.sin(turn.inBearing  * R) * TURN_LABEL_OFFSET;
+        // toStreet: step opposite outBearing
+        const tx = -Math.cos(turn.outBearing * R) * TURN_LABEL_OFFSET;
+        const ty =  Math.sin(turn.outBearing * R) * TURN_LABEL_OFFSET;
+
+        for (const [name, b, ox, oy] of [
+            [turn.fromStreet, turn.inBearing,  fx, fy],
+            [turn.toStreet,   turn.outBearing, tx, ty],
+        ]) {
             if (!name) continue;
             const prev = out.get(name);
             if (!prev || Math.abs(turn.turnAngle) > prev.turnAngle) {
-                out.set(name, { x: pt.x, y: pt.y, angle: snapAngle(b), turnAngle: Math.abs(turn.turnAngle) });
+                out.set(name, { x: pt.x + ox, y: pt.y + oy, angle: snapAngle(b), turnAngle: Math.abs(turn.turnAngle) });
             }
         }
     }
@@ -431,12 +449,39 @@ function placePinAt(lngLat) {
     positionLabels(map, streetCache, labelEls, overlay, { pins, route: activeRoute });
 }
 
+// Trim `dist` degrees off each end of a coordinate polyline.
+function trimPolyline(coords, dist) {
+    if (coords.length < 2) return coords;
+    let pts = coords.slice();
+
+    for (const forward of [true, false]) {
+        let rem = dist;
+        while (pts.length > 2) {
+            const a = forward ? pts[0] : pts[pts.length - 2];
+            const b = forward ? pts[1] : pts[pts.length - 1];
+            const d = Math.hypot(b[0] - a[0], b[1] - a[1]);
+            if (d <= rem) { rem -= d; forward ? pts.shift() : pts.pop(); }
+            else {
+                const t = rem / d;
+                const np = [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])];
+                if (forward) pts[0] = np; else pts[pts.length - 1] = np;
+                break;
+            }
+        }
+    }
+    return pts;
+}
+
+// Offset in degrees to pull the route line away from the pin markers (~15 m).
+const ROUTE_PIN_OFFSET = 0.00015;
+
 function updateRouteLayer(coords) {
     const src = map.getSource('route');
     if (!src) return;
+    const display = coords.length > 1 ? trimPolyline(coords, ROUTE_PIN_OFFSET) : [];
     src.setData({
         type: 'Feature',
-        geometry: { type: 'LineString', coordinates: coords.length > 1 ? coords : [] },
+        geometry: { type: 'LineString', coordinates: display },
     });
 }
 
