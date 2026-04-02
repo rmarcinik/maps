@@ -58,7 +58,7 @@ def run(url):
             else:
                 hidden.append(text)
 
-        page.screenshot(path="~/Downloads/test_screenshot.png")
+        page.screenshot(path="test_screenshot.png")
         browser.close()
 
     total     = len(highlighted) + len(dimmed)
@@ -160,7 +160,7 @@ def run_pins(url):
         if route_coords() != 0:
             failures.append(f"after clear: expected empty route, got {route_coords()} coords")
 
-        page.screenshot(path="~/Downloads/test_screenshot_pins.png")
+        page.screenshot(path="test_screenshot_pins.png")
         browser.close()
 
     for f in failures:
