@@ -12,6 +12,19 @@ function segmentIntersection(p1, p2, e1, e2) {
     return { x: p1.x + t * dx1, y: p1.y + t * dy1 };
 }
 
+// Intersect two geographic line segments [lng,lat][]. Returns {t, u, pt} or null.
+function geoSegIntersect(p1, p2, p3, p4) {
+    const dx1 = p2[0]-p1[0], dy1 = p2[1]-p1[1];
+    const dx2 = p4[0]-p3[0], dy2 = p4[1]-p3[1];
+    const denom = dx1*dy2 - dy1*dx2;
+    if (Math.abs(denom) < 1e-12) return null;
+    const dx3 = p3[0]-p1[0], dy3 = p3[1]-p1[1];
+    const t = (dx3*dy2 - dy3*dx2) / denom;
+    const u = (dx3*dy1 - dy3*dx1) / denom;
+    if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+    return { t, u, pt: [p1[0] + t*dx1, p1[1] + t*dy1] };
+}
+
 function closestOnSegment(p1, p2, cx, cy) {
     const dx = p2.x - p1.x, dy = p2.y - p1.y;
     const len2 = dx * dx + dy * dy;
@@ -39,6 +52,18 @@ function findPolylineIntersection(pts1, pts2) {
         }
     }
     return null;
+}
+
+// Normalize angle to (-180, 180].
+function normalizeAngle(a) {
+    while (a >  180) a -= 360;
+    while (a <= -180) a += 360;
+    return a;
+}
+
+// Compass bearing in degrees: east=0, north=90, CCW positive (matches atan2 convention).
+function bearing(from, to) {
+    return Math.atan2(to[1] - from[1], to[0] - from[0]) * 180 / Math.PI;
 }
 
 // --- Road hierarchy ---
@@ -120,35 +145,57 @@ function buildStreetTree(map, streetCache) {
 
 const DIM = 0.2;
 
-function computeLabelPositions(map, streetCache, { pins: activePins = [], routeStreets: routes = new Set() } = {}) {
-    const tree = buildStreetTree(map, streetCache);
+// Build a map of street name → screen-space label position derived from route turns.
+// When a street appears in multiple turns, keep the one with the largest |turnAngle|.
+function turnLabelPositions(map, turns) {
+    const out = new Map(); // name → {x, y, angle}
+    for (const turn of turns) {
+        const pt = map.project(turn.coord);
+        for (const [name, b] of [[turn.fromStreet, turn.inBearing], [turn.toStreet, turn.outBearing]]) {
+            if (!name) continue;
+            const prev = out.get(name);
+            if (!prev || Math.abs(turn.turnAngle) > prev.turnAngle) {
+                out.set(name, { x: pt.x, y: pt.y, angle: snapAngle(b), turnAngle: Math.abs(turn.turnAngle) });
+            }
+        }
+    }
+    return out;
+}
+
+function computeLabelPositions(map, streetCache, { pins = [], route = null } = {}) {
+    const tree    = buildStreetTree(map, streetCache);
+    const turnPts = route ? turnLabelPositions(map, route.turns) : new Map();
+    const pinPts  = pins.map(p => map.project(p.lngLat));
     const positions = new Map();
 
     for (const [name, { rank, parentName, pt }] of tree) {
         if (!pt) continue;
-        const angle = snapAngle(pt.angle);
 
+        // Route streets: prefer turn intersection position over tree position.
+        const override = turnPts.get(name);
+        const { x, y, angle } = override
+            ? { x: override.x, y: override.y, angle: override.angle }
+            : { x: pt.x, y: pt.y, angle: snapAngle(pt.angle) };
+
+        // Opacity: route streets and streets near any pin are always full.
         let opacity;
-        if (routes.size > 0) {
-            // Two-pin mode: route streets always full, others normal hierarchy.
-            opacity = routes.has(name) ? 1 : (parentName ? (rank <= 5 ? 1 : DIM) : 1);
-        } else if (activePins.length === 1) {
-            // One-pin mode: streets within 200px of pin skip the dim penalty.
-            const pinPt = map.project(activePins[0].lngLat);
-            const near = Math.hypot(pt.x - pinPt.x, pt.y - pinPt.y) < 200;
-            opacity = (parentName && rank > 5 && !near) ? DIM : 1;
+        const nearPin = pinPts.some(p => Math.hypot(x - p.x, y - p.y) < 200);
+        if (route) {
+            opacity = (route.streets.has(name) || nearPin) ? 1 : (parentName ? (rank <= 5 ? 1 : DIM) : 1);
+        } else if (nearPin) {
+            opacity = 1;
         } else {
             opacity = parentName ? (rank <= 5 ? 1 : DIM) : 1;
         }
 
-        positions.set(name, { x: pt.x, y: pt.y, angle, label: name, opacity });
+        positions.set(name, { x, y, angle, label: name, opacity });
     }
 
     return positions;
 }
 
-function positionLabels(map, streetCache, labelEls, overlay, pinCtx) {
-    const positions = computeLabelPositions(map, streetCache, pinCtx);
+function positionLabels(map, streetCache, labelEls, overlay, ctx) {
+    const positions = computeLabelPositions(map, streetCache, ctx);
     const visible = new Set();
     for (const [key, { x, y, angle, label, opacity }] of positions) {
         visible.add(key);
@@ -175,12 +222,12 @@ function positionLabels(map, streetCache, labelEls, overlay, pinCtx) {
 // Build a planar graph by splitting every polyline at its intersections with
 // all other polylines. This ensures roads connect at crossings even when the
 // source features don't share endpoint coordinates.
+//
+// segments: [{ pts: [[lng,lat],...], name: string }]
+// Returns { nodes: Map<key, [lng,lat]>, edges: Map<key, [{to, dist, name, bearing}]> }
 function buildRouteGraph(segments) {
-    // segments: [{pts: [[lng,lat],...], name}]
-
-    // 1. For every pair of polylines, find intersection points and record
-    //    which segment index (along each polyline) they fall on.
-    const cuts = segments.map(() => []); // cuts[i] = [{t, pt, j}] along polyline i
+    // 1. Find all crossing points between every pair of polylines.
+    const cuts = segments.map(() => []); // cuts[i] = [{ segIdx, t, pt }]
 
     for (let i = 0; i < segments.length; i++) {
         const A = segments[i].pts;
@@ -188,56 +235,48 @@ function buildRouteGraph(segments) {
             const B = segments[j].pts;
             for (let ai = 0; ai < A.length - 1; ai++) {
                 for (let bj = 0; bj < B.length - 1; bj++) {
-                    // Segment-segment intersection in geographic space (small area, linear ok)
-                    const p1 = A[ai], p2 = A[ai + 1], p3 = B[bj], p4 = B[bj + 1];
-                    const dx1 = p2[0]-p1[0], dy1 = p2[1]-p1[1];
-                    const dx2 = p4[0]-p3[0], dy2 = p4[1]-p3[1];
-                    const denom = dx1*dy2 - dy1*dx2;
-                    if (Math.abs(denom) < 1e-12) continue;
-                    const dx3 = p3[0]-p1[0], dy3 = p3[1]-p1[1];
-                    const t = (dx3*dy2 - dy3*dx2) / denom;
-                    const u = (dx3*dy1 - dy3*dx1) / denom;
-                    if (t < 0 || t > 1 || u < 0 || u > 1) continue;
-                    const pt = [p1[0] + t*dx1, p1[1] + t*dy1];
-                    cuts[i].push({ segIdx: ai, t, pt });
-                    cuts[j].push({ segIdx: bj, t: u, pt });
+                    const hit = geoSegIntersect(A[ai], A[ai+1], B[bj], B[bj+1]);
+                    if (hit) {
+                        cuts[i].push({ segIdx: ai, t: hit.t, pt: hit.pt });
+                        cuts[j].push({ segIdx: bj, t: hit.u, pt: hit.pt });
+                    }
                 }
             }
         }
     }
 
-    // 2. Split each polyline at its cut points, producing a list of sub-segments.
-    const nodes = new Map(); // key → [lng,lat]
-    const edges = new Map(); // key → [{to, dist, name}]
+    // 2. Split each polyline at cut points and add directed edges with bearings.
     const PREC = 1e6;
-    const key = c => `${Math.round(c[0]*PREC)},${Math.round(c[1]*PREC)}`;
-
-    const addEdge = (a, b, dist, name) => {
-        if (!edges.has(a)) edges.set(a, []);
-        edges.get(a).push({ to: b, dist, name });
-    };
+    const nodeKey = c => `${Math.round(c[0]*PREC)},${Math.round(c[1]*PREC)}`;
+    const nodes = new Map(); // key → [lng,lat]
+    const edges = new Map(); // key → [{to, dist, name, bearing}]
 
     const ensureNode = c => {
-        const k = key(c);
+        const k = nodeKey(c);
         if (!nodes.has(k)) nodes.set(k, c);
         return k;
     };
 
+    const addEdge = (ka, kb, a, b, name) => {
+        const dist = Math.hypot(b[0]-a[0], b[1]-a[1]);
+        const b_fwd = bearing(a, b);
+        const b_rev = bearing(b, a);
+        if (!edges.has(ka)) edges.set(ka, []);
+        if (!edges.has(kb)) edges.set(kb, []);
+        edges.get(ka).push({ to: kb, dist, name, bearing: b_fwd });
+        edges.get(kb).push({ to: ka, dist, name, bearing: b_rev });
+    };
+
     for (let i = 0; i < segments.length; i++) {
         const { pts, name } = segments[i];
-        // Build ordered list of (segIdx, t, pt) for all points along this polyline.
-        const chain = [];
-        for (let s = 0; s < pts.length; s++) chain.push({ segIdx: s, t: 0, pt: pts[s] });
+        const chain = pts.map((pt, s) => ({ segIdx: s, t: 0, pt }));
         for (const c of cuts[i]) chain.push(c);
         chain.sort((a, b) => a.segIdx - b.segIdx || a.t - b.t);
 
         for (let c = 0; c < chain.length - 1; c++) {
             const ka = ensureNode(chain[c].pt);
-            const kb = ensureNode(chain[c + 1].pt);
-            if (ka === kb) continue;
-            const d = Math.hypot(chain[c].pt[0]-chain[c+1].pt[0], chain[c].pt[1]-chain[c+1].pt[1]);
-            addEdge(ka, kb, d, name);
-            addEdge(kb, ka, d, name);
+            const kb = ensureNode(chain[c+1].pt);
+            if (ka !== kb) addEdge(ka, kb, chain[c].pt, chain[c+1].pt, name);
         }
     }
 
@@ -253,12 +292,14 @@ function nearestNode(nodes, lngLat) {
     return best;
 }
 
+// Returns { keys, prevStreet, prevBearing } or null.
 function dijkstra(edges, startKey, endKey) {
-    const dist = new Map([[startKey, 0]]);
-    const prev = new Map();
-    const prevStreet = new Map();
-    const visited = new Set();
-    const queue = [[0, startKey]];
+    const dist      = new Map([[startKey, 0]]);
+    const prev      = new Map();
+    const prevStreet  = new Map();
+    const prevBearing = new Map();
+    const visited   = new Set();
+    const queue     = [[0, startKey]];
 
     while (queue.length) {
         queue.sort((a, b) => a[0] - b[0]);
@@ -266,12 +307,13 @@ function dijkstra(edges, startKey, endKey) {
         if (visited.has(u)) continue;
         visited.add(u);
         if (u === endKey) break;
-        for (const { to, dist: w, name } of (edges.get(u) || [])) {
+        for (const { to, dist: w, name, bearing: b } of (edges.get(u) || [])) {
             const nd = d + w;
             if (!dist.has(to) || nd < dist.get(to)) {
                 dist.set(to, nd);
                 prev.set(to, u);
                 prevStreet.set(to, name);
+                prevBearing.set(to, b);
                 queue.push([nd, to]);
             }
         }
@@ -279,19 +321,24 @@ function dijkstra(edges, startKey, endKey) {
 
     if (!prev.has(endKey)) return null;
 
-    const streets = new Set();
     const keys = [];
     let cur = endKey;
     while (cur !== startKey) {
         keys.unshift(cur);
-        streets.add(prevStreet.get(cur));
         cur = prev.get(cur);
         if (cur === undefined) return null;
     }
     keys.unshift(startKey);
-    return { keys, streets };
+    return { keys, prevStreet, prevBearing };
 }
 
+// Returns { coords, streets, turns } or null.
+//
+// turns: one entry per street change along the route:
+//   { coord, fromStreet, toStreet, inBearing, outBearing, turnAngle }
+//
+// Bearings are in degrees, east=0, north=90, CCW positive (standard atan2).
+// turnAngle is the signed angle from inBearing to outBearing, normalized to (-180, 180].
 function computeRoute(map, pin1, pin2) {
     const features = map.queryRenderedFeatures({ layers: ['road-name-data'] });
     const segments = [];
@@ -301,14 +348,38 @@ function computeRoute(map, pin1, pin2) {
         const lines = type === 'LineString' ? [f.geometry.coordinates] : f.geometry.coordinates;
         for (const pts of lines) segments.push({ pts, name: f.properties.name || '' });
     }
+
     const { nodes, edges } = buildRouteGraph(segments);
     const start = nearestNode(nodes, pin1.lngLat);
-    const end = nearestNode(nodes, pin2.lngLat);
+    const end   = nearestNode(nodes, pin2.lngLat);
     if (!start || !end) return null;
+
     const result = dijkstra(edges, start, end);
     if (!result) return null;
-    const streets = new Set([...result.streets].filter(Boolean));
-    return { coords: result.keys.map(k => nodes.get(k)), streets };
+
+    const { keys, prevStreet, prevBearing } = result;
+    const coords  = keys.map(k => nodes.get(k));
+    const streets = new Set(keys.slice(1).map(k => prevStreet.get(k)).filter(Boolean));
+
+    // Build turns: emit one entry wherever the street name changes.
+    const turns = [];
+    for (let i = 1; i < keys.length - 1; i++) {
+        const fromStreet = prevStreet.get(keys[i]);
+        const toStreet   = prevStreet.get(keys[i + 1]);
+        if (fromStreet === toStreet) continue;
+        const inBearing  = prevBearing.get(keys[i]);
+        const outBearing = prevBearing.get(keys[i + 1]);
+        turns.push({
+            coord:      nodes.get(keys[i]),
+            fromStreet,
+            toStreet,
+            inBearing,
+            outBearing,
+            turnAngle: normalizeAngle(outBearing - inBearing),
+        });
+    }
+
+    return { coords, streets, turns };
 }
 
 // --- Pin management ---
@@ -317,7 +388,7 @@ function repositionPins(map) {
     for (const pin of pins) {
         const pt = map.project(pin.lngLat);
         pin.element.style.left = pt.x + 'px';
-        pin.element.style.top = pt.y + 'px';
+        pin.element.style.top  = pt.y + 'px';
     }
 }
 
@@ -331,20 +402,14 @@ function placePinAt(lngLat) {
     overlay.appendChild(el);
     pins.push({ lngLat, element: el });
 
-    routeStreets = new Set();
-    if (pins.length === 2) {
-        const route = computeRoute(map, pins[0], pins[1]);
-        routeStreets = route ? route.streets : new Set();
-        updateRouteLayer(map, route ? route.coords : []);
-    } else {
-        updateRouteLayer(map, []);
-    }
+    activeRoute = pins.length === 2 ? computeRoute(map, pins[0], pins[1]) : null;
+    updateRouteLayer(activeRoute?.coords ?? []);
 
     repositionPins(map);
-    positionLabels(map, streetCache, labelEls, overlay, { pins, routeStreets });
+    positionLabels(map, streetCache, labelEls, overlay, { pins, route: activeRoute });
 }
 
-function updateRouteLayer(map, coords) {
+function updateRouteLayer(coords) {
     const src = map.getSource('route');
     if (!src) return;
     src.setData({
@@ -353,7 +418,7 @@ function updateRouteLayer(map, coords) {
     });
 }
 
-// --- Cache (slow path) ---
+// --- Street cache (slow path) ---
 
 function refreshCache(map, streetCache, labelEls) {
     if (map.getZoom() < 14) {
@@ -420,28 +485,27 @@ if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js");
 
 const overlay = document.getElementById("street-labels");
 let streetCache = new Map();
-let labelEls = new Map();
-let pins = [];
-let routeStreets = new Set();
+let labelEls    = new Map();
+let pins        = [];
+let activeRoute = null;
 
-const pinCtx = () => ({ pins, routeStreets });
+const ctx = () => ({ pins, route: activeRoute });
 
 const refresh = () => {
     streetCache = refreshCache(map, streetCache, labelEls);
     if (pins.length === 2) {
-        const route = computeRoute(map, pins[0], pins[1]);
-        routeStreets = route ? route.streets : new Set();
-        updateRouteLayer(map, route ? route.coords : []);
+        activeRoute = computeRoute(map, pins[0], pins[1]);
+        updateRouteLayer(activeRoute?.coords ?? []);
     }
-    positionLabels(map, streetCache, labelEls, overlay, pinCtx());
+    positionLabels(map, streetCache, labelEls, overlay, ctx());
 };
 
-map.on("idle", refresh);
-map.on("load", refresh);
+map.on("idle",    refresh);
+map.on("load",    refresh);
 map.on("move", () => {
     contextMenu.hidden = true;
     repositionPins(map);
-    positionLabels(map, streetCache, labelEls, overlay, pinCtx());
+    positionLabels(map, streetCache, labelEls, overlay, ctx());
 });
 map.on("moveend", () => {
     history.replaceState(null, "", "#" + formatUrlPosition(map.getCenter(), map.getZoom()));
@@ -462,7 +526,7 @@ map.getCanvas().addEventListener('contextmenu', e => {
     contextLngLat = map.unproject([e.clientX, e.clientY]);
     document.getElementById('cm-clear').style.display = pins.length ? '' : 'none';
     contextMenu.style.left = e.clientX + 'px';
-    contextMenu.style.top = e.clientY + 'px';
+    contextMenu.style.top  = e.clientY + 'px';
     contextMenu.hidden = false;
 });
 
@@ -476,8 +540,8 @@ document.getElementById('cm-place').addEventListener('click', () => {
 document.getElementById('cm-clear').addEventListener('click', () => {
     for (const pin of pins) pin.element.remove();
     pins = [];
-    routeStreets = new Set();
-    updateRouteLayer(map, []);
-    positionLabels(map, streetCache, labelEls, overlay, pinCtx());
+    activeRoute = null;
+    updateRouteLayer([]);
+    positionLabels(map, streetCache, labelEls, overlay, ctx());
     contextMenu.hidden = true;
 });
