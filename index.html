@@ -75,11 +75,53 @@
                 white-space: nowrap;
                 transform-origin: center center;
             }
+
+            .pin-marker {
+                position: absolute;
+                width: 10px;
+                height: 10px;
+                background: #ff3333;
+                border-radius: 50%;
+                transform: translate(-50%, -50%);
+                box-shadow: 0 0 0 2px #000;
+                pointer-events: none;
+            }
+
+            #context-menu {
+                position: absolute;
+                background: #111;
+                border: 1px solid #333;
+                z-index: 10;
+                pointer-events: auto;
+            }
+
+            #context-menu button {
+                display: block;
+                width: 100%;
+                padding: 8px 16px;
+                background: none;
+                border: none;
+                color: #ccc;
+                font: 300 13px/1 "Inter", sans-serif;
+                letter-spacing: 0.04em;
+                text-align: left;
+                cursor: pointer;
+                white-space: nowrap;
+            }
+
+            #context-menu button:hover {
+                background: #222;
+                color: #fff;
+            }
         </style>
     </head>
     <body>
         <div id="map"></div>
         <div id="street-labels"></div>
+        <div id="context-menu" hidden>
+            <button id="cm-place">Place pin</button>
+            <button id="cm-clear">Clear pins</button>
+        </div>
         <script src="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.js"></script>
         <script src="map.js"></script>
     </body>

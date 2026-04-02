@@ -120,23 +120,35 @@ function buildStreetTree(map, streetCache) {
 
 const DIM = 0.2;
 
-function computeLabelPositions(map, streetCache) {
+function computeLabelPositions(map, streetCache, { pins: activePins = [], routeStreets: routes = new Set() } = {}) {
     const tree = buildStreetTree(map, streetCache);
     const positions = new Map();
 
     for (const [name, { rank, parentName, pt }] of tree) {
         if (!pt) continue;
         const angle = snapAngle(pt.angle);
-        // Root streets (no parent) are full opacity. Children dim with depth.
-        const opacity = parentName ? (rank <= 5 ? 1 : DIM) : 1;
+
+        let opacity;
+        if (routes.size > 0) {
+            // Two-pin mode: route streets always full, others normal hierarchy.
+            opacity = routes.has(name) ? 1 : (parentName ? (rank <= 5 ? 1 : DIM) : 1);
+        } else if (activePins.length === 1) {
+            // One-pin mode: streets within 200px of pin skip the dim penalty.
+            const pinPt = map.project(activePins[0].lngLat);
+            const near = Math.hypot(pt.x - pinPt.x, pt.y - pinPt.y) < 200;
+            opacity = (parentName && rank > 5 && !near) ? DIM : 1;
+        } else {
+            opacity = parentName ? (rank <= 5 ? 1 : DIM) : 1;
+        }
+
         positions.set(name, { x: pt.x, y: pt.y, angle, label: name, opacity });
     }
 
     return positions;
 }
 
-function positionLabels(map, streetCache, labelEls, overlay) {
-    const positions = computeLabelPositions(map, streetCache);
+function positionLabels(map, streetCache, labelEls, overlay, pinCtx) {
+    const positions = computeLabelPositions(map, streetCache, pinCtx);
     const visible = new Set();
     for (const [key, { x, y, angle, label, opacity }] of positions) {
         visible.add(key);
@@ -156,6 +168,137 @@ function positionLabels(map, streetCache, labelEls, overlay) {
     for (const [key, el] of labelEls) {
         if (!visible.has(key)) el.style.opacity = 0;
     }
+}
+
+// --- Route graph & pathfinding ---
+
+function buildRouteGraph(streetCache) {
+    const PREC = 1e4; // snap coords to ~10m to join intersections
+    const snap = n => Math.round(n * PREC) / PREC;
+    const key = c => `${snap(c[0])},${snap(c[1])}`;
+    const nodes = new Map(); // key → [lng, lat]
+    const edges = new Map(); // key → [{to, dist, name}]
+
+    const addEdge = (a, b, dist, name) => {
+        if (!edges.has(a)) edges.set(a, []);
+        edges.get(a).push({ to: b, dist, name });
+    };
+
+    for (const [name, { lines }] of streetCache) {
+        for (const line of lines) {
+            for (let i = 0; i < line.length; i++) {
+                const k = key(line[i]);
+                if (!nodes.has(k)) nodes.set(k, line[i]);
+                if (i > 0) {
+                    const pk = key(line[i - 1]);
+                    const d = Math.hypot(line[i][0] - line[i-1][0], line[i][1] - line[i-1][1]);
+                    addEdge(pk, k, d, name);
+                    addEdge(k, pk, d, name);
+                }
+            }
+        }
+    }
+    return { nodes, edges };
+}
+
+function nearestNode(nodes, lngLat) {
+    let best = null, bestDist = Infinity;
+    for (const [k, c] of nodes) {
+        const d = Math.hypot(c[0] - lngLat.lng, c[1] - lngLat.lat);
+        if (d < bestDist) { bestDist = d; best = k; }
+    }
+    return best;
+}
+
+function dijkstra(edges, startKey, endKey) {
+    const dist = new Map([[startKey, 0]]);
+    const prev = new Map();
+    const prevStreet = new Map();
+    const visited = new Set();
+    const queue = [[0, startKey]];
+
+    while (queue.length) {
+        queue.sort((a, b) => a[0] - b[0]);
+        const [d, u] = queue.shift();
+        if (visited.has(u)) continue;
+        visited.add(u);
+        if (u === endKey) break;
+        for (const { to, dist: w, name } of (edges.get(u) || [])) {
+            const nd = d + w;
+            if (!dist.has(to) || nd < dist.get(to)) {
+                dist.set(to, nd);
+                prev.set(to, u);
+                prevStreet.set(to, name);
+                queue.push([nd, to]);
+            }
+        }
+    }
+
+    if (!prev.has(endKey)) return null;
+
+    const streets = new Set();
+    const keys = [];
+    let cur = endKey;
+    while (cur !== startKey) {
+        keys.unshift(cur);
+        streets.add(prevStreet.get(cur));
+        cur = prev.get(cur);
+        if (cur === undefined) return null;
+    }
+    keys.unshift(startKey);
+    return { keys, streets };
+}
+
+function computeRoute(streetCache, pin1, pin2) {
+    const { nodes, edges } = buildRouteGraph(streetCache);
+    const start = nearestNode(nodes, pin1.lngLat);
+    const end = nearestNode(nodes, pin2.lngLat);
+    if (!start || !end) return null;
+    const result = dijkstra(edges, start, end);
+    if (!result) return null;
+    return { coords: result.keys.map(k => nodes.get(k)), streets: result.streets };
+}
+
+// --- Pin management ---
+
+function repositionPins(map) {
+    for (const pin of pins) {
+        const pt = map.project(pin.lngLat);
+        pin.element.style.left = pt.x + 'px';
+        pin.element.style.top = pt.y + 'px';
+    }
+}
+
+function placePinAt(lngLat) {
+    if (pins.length >= 2) {
+        pins[0].element.remove();
+        pins.shift();
+    }
+    const el = document.createElement('div');
+    el.className = 'pin-marker';
+    overlay.appendChild(el);
+    pins.push({ lngLat, element: el });
+
+    routeStreets = new Set();
+    if (pins.length === 2) {
+        const route = computeRoute(streetCache, pins[0], pins[1]);
+        routeStreets = route ? route.streets : new Set();
+        updateRouteLayer(map, route ? route.coords : []);
+    } else {
+        updateRouteLayer(map, []);
+    }
+
+    repositionPins(map);
+    positionLabels(map, streetCache, labelEls, overlay, { pins, routeStreets });
+}
+
+function updateRouteLayer(map, coords) {
+    const src = map.getSource('route');
+    if (!src) return;
+    src.setData({
+        type: 'Feature',
+        geometry: { type: 'LineString', coordinates: coords.length > 1 ? coords : [] },
+    });
 }
 
 // --- Cache (slow path) ---
@@ -215,22 +358,39 @@ const geolocate = new maplibregl.GeolocateControl({
 });
 
 map.addControl(geolocate, "bottom-right");
-map.on("load", () => { if (!initialPos) geolocate.trigger(); });
+map.on("load", () => {
+    if (!initialPos) geolocate.trigger();
+    map.addSource('route', { type: 'geojson', data: { type: 'Feature', geometry: { type: 'LineString', coordinates: [] } } });
+    map.addLayer({ id: 'route', type: 'line', source: 'route', paint: { 'line-color': '#ff3333', 'line-width': 3, 'line-opacity': 0.85 } });
+});
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js");
 
 const overlay = document.getElementById("street-labels");
 let streetCache = new Map();
 let labelEls = new Map();
+let pins = [];
+let routeStreets = new Set();
+
+const pinCtx = () => ({ pins, routeStreets });
 
 const refresh = () => {
     streetCache = refreshCache(map, streetCache, labelEls);
-    positionLabels(map, streetCache, labelEls, overlay);
+    if (pins.length === 2) {
+        const route = computeRoute(streetCache, pins[0], pins[1]);
+        routeStreets = route ? route.streets : new Set();
+        updateRouteLayer(map, route ? route.coords : []);
+    }
+    positionLabels(map, streetCache, labelEls, overlay, pinCtx());
 };
 
 map.on("idle", refresh);
 map.on("load", refresh);
-map.on("move", () => positionLabels(map, streetCache, labelEls, overlay));
+map.on("move", () => {
+    contextMenu.hidden = true;
+    repositionPins(map);
+    positionLabels(map, streetCache, labelEls, overlay, pinCtx());
+});
 map.on("moveend", () => {
     history.replaceState(null, "", "#" + formatUrlPosition(map.getCenter(), map.getZoom()));
 });
@@ -238,4 +398,34 @@ map.on("moveend", () => {
 window.addEventListener("hashchange", () => {
     const pos = parseUrlPosition(location.hash);
     if (pos) map.jumpTo({ center: pos.center, zoom: pos.zoom });
+});
+
+// --- Context menu ---
+
+const contextMenu = document.getElementById('context-menu');
+let contextLngLat = null;
+
+map.getCanvas().addEventListener('contextmenu', e => {
+    e.preventDefault();
+    contextLngLat = map.unproject([e.clientX, e.clientY]);
+    document.getElementById('cm-clear').style.display = pins.length ? '' : 'none';
+    contextMenu.style.left = e.clientX + 'px';
+    contextMenu.style.top = e.clientY + 'px';
+    contextMenu.hidden = false;
+});
+
+map.on('click', () => { contextMenu.hidden = true; });
+
+document.getElementById('cm-place').addEventListener('click', () => {
+    if (contextLngLat) placePinAt(contextLngLat);
+    contextMenu.hidden = true;
+});
+
+document.getElementById('cm-clear').addEventListener('click', () => {
+    for (const pin of pins) pin.element.remove();
+    pins = [];
+    routeStreets = new Set();
+    updateRouteLayer(map, []);
+    positionLabels(map, streetCache, labelEls, overlay, pinCtx());
+    contextMenu.hidden = true;
 });
