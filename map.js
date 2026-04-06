@@ -147,6 +147,7 @@ let _defsEl   = null;
 let _idCounter = 0;
 
 function renderStreets(map, streetCache, svgEl, { pins = [], route = null } = {}) {
+    svgEl.style.transform = '';
     if (!_defsEl) {
         _defsEl = document.createElementNS(NS, 'defs');
         svgEl.prepend(_defsEl);
@@ -396,17 +397,37 @@ function placePinAt(lngLat) {
 
 // --- Street cache (slow path) ---
 
+// Minimum screen length (px) for the longest visible segment of a street.
+// Streets shorter than this on screen are not worth labeling.
+const MIN_LABEL_PX = 120;
+
 function refreshCache(map, streetCache) {
-    if (map.getZoom() < 14) { streetCache.clear(); return streetCache; }
-    const next = new Map();
-    for (const f of map.queryRenderedFeatures({ layers: ['road-name-data'] })) {
+    if (map.getZoom() < 12) { streetCache.clear(); return streetCache; }
+    const raw = new Map(); // name → { lines[], rank }
+    const layers = map.getZoom() < 14
+        ? ['road-major-data']
+        : ['road-major-data', 'road-name-data'];
+    for (const f of map.queryRenderedFeatures({ layers })) {
         const name = f.properties.name;
         const type = f.geometry.type;
-        if (!name || next.has(name)) continue;
+        if (!name) continue;
         if (type !== 'LineString' && type !== 'MultiLineString') continue;
         if (SKIP_CLASSES.has(f.properties.class)) continue;
         const lines = type === 'LineString' ? [f.geometry.coordinates] : f.geometry.coordinates;
-        next.set(name, { lines, rank: streetRank(f.properties.class) });
+        const rank  = streetRank(f.properties.class);
+        if (raw.has(name)) {
+            const e = raw.get(name);
+            e.lines.push(...lines);
+            e.rank = Math.min(e.rank, rank);
+        } else {
+            raw.set(name, { lines, rank });
+        }
+    }
+    // Filter to streets whose longest projected segment meets the minimum length.
+    const next = new Map();
+    for (const [name, entry] of raw) {
+        const { len } = longestLine(entry.lines, map);
+        if (len >= MIN_LABEL_PX) next.set(name, entry);
     }
     return next;
 }
@@ -464,9 +485,29 @@ let activeRoute = null;
 
 const ctx = () => ({ pins, route: activeRoute });
 
+// Reference state saved after each full render — used to CSS-transform the
+// frozen SVG during panning/zooming without touching the DOM.
+let _refRender = null; // { centerGeo, centerPx: {x,y}, zoom }
+
+function applyMoveTransform() {
+    if (!_refRender) return;
+    const { centerGeo, centerPx, zoom: refZoom } = _refRender;
+    const s        = Math.pow(2, map.getZoom() - refZoom);
+    const newCtr   = map.project(centerGeo);
+    const tx       = newCtr.x - centerPx.x * s;
+    const ty       = newCtr.y - centerPx.y * s;
+    svgEl.style.transformOrigin = '0 0';
+    svgEl.style.transform = `translate(${tx}px,${ty}px) scale(${s})`;
+}
+
 const refresh = () => {
     streetCache = refreshCache(map, streetCache);
     renderStreets(map, streetCache, svgEl, ctx());
+    _refRender = {
+        centerGeo: map.getCenter(),
+        centerPx:  { x: svgEl.clientWidth / 2, y: svgEl.clientHeight / 2 },
+        zoom:      map.getZoom(),
+    };
 };
 
 map.on('idle',    refresh);
@@ -474,7 +515,7 @@ map.on('load',    refresh);
 map.on('move', () => {
     contextMenu.hidden = true;
     repositionPins(map);
-    renderStreets(map, streetCache, svgEl, ctx());
+    applyMoveTransform();
 });
 map.on('moveend', () => {
     history.replaceState(null, '', '#' + formatUrlPosition(map.getCenter(), map.getZoom()));

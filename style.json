@@ -192,6 +192,18 @@
       }
     },
     {
+      "id": "road-major-data",
+      "type": "line",
+      "source": "openmaptiles",
+      "source-layer": "transportation_name",
+      "filter": ["match", ["get", "class"],
+        ["motorway", "trunk", "primary",
+         "motorway_construction", "trunk_construction", "primary_construction"],
+        true, false],
+      "minzoom": 12,
+      "paint": { "line-opacity": 0, "line-width": 1 }
+    },
+    {
       "id": "road-name-data",
       "type": "line",
       "source": "openmaptiles",
