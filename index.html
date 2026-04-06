@@ -60,20 +60,12 @@
                 color: #555 !important;
             }
 
+            #street-svg,
             #street-labels {
                 position: absolute;
                 inset: 0;
                 pointer-events: none;
                 overflow: hidden;
-            }
-
-            .street-label {
-                position: absolute;
-                color: #ccc;
-                font: 300 13px/1 "Inter", sans-serif;
-                letter-spacing: 0.06em;
-                white-space: nowrap;
-                transform-origin: center center;
             }
 
             .pin-marker {
@@ -117,6 +109,7 @@
     </head>
     <body>
         <div id="map"></div>
+        <svg id="street-svg" width="100%" height="100%"></svg>
         <div id="street-labels"></div>
         <div id="context-menu" hidden>
             <button id="cm-place">Place pin</button>
