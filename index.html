@@ -122,7 +122,10 @@
             <button id="cm-place">Place pin</button>
             <button id="cm-clear">Clear pins</button>
         </div>
+        <script type="importmap">
+        { "imports": { "@chenglou/pretext": "/node_modules/@chenglou/pretext/dist/layout.js" } }
+        </script>
         <script src="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.js"></script>
-        <script src="map.js"></script>
+        <script type="module" src="map.js"></script>
     </body>
 </html>

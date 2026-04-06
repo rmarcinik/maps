@@ -1,3 +1,5 @@
+import { prepareWithSegments, walkLineRanges } from '@chenglou/pretext';
+
 // --- Geometry helpers (pure) ---
 
 function segmentIntersection(p1, p2, e1, e2) {
@@ -64,6 +66,105 @@ function normalizeAngle(a) {
 // Compass bearing in degrees: east=0, north=90, CCW positive (matches atan2 convention).
 function bearing(from, to) {
     return Math.atan2(to[1] - from[1], to[0] - from[0]) * 180 / Math.PI;
+}
+
+// --- Label collision detection ---
+
+// Font spec must match the CSS: font: 300 13px/1 "Inter" + letter-spacing: 0.06em
+const LABEL_FONT = '300 13px Inter';
+const LABEL_H    = 14;  // px — line-height (13) + 1px breathing room
+const LETTER_SPC = 0.06 * 13; // em×size = px per character gap
+
+const _measureCache = new Map(); // text → {w, h}
+
+function measureLabel(text) {
+    if (_measureCache.has(text)) return _measureCache.get(text);
+    const p = prepareWithSegments(text, LABEL_FONT);
+    let maxW = 0;
+    walkLineRanges(p, Infinity, line => { if (line.width > maxW) maxW = line.width; });
+    const w = maxW + LETTER_SPC * text.length;
+    const result = { w, h: LABEL_H };
+    _measureCache.set(text, result);
+    return result;
+}
+
+// 4 corners of a rect (w×h) centered at (x,y) rotated by angleDeg, CCW.
+function labelCorners(x, y, angleDeg, w, h) {
+    const a = angleDeg * Math.PI / 180;
+    const cos = Math.cos(a), sin = Math.sin(a);
+    const hw = w / 2, hh = h / 2;
+    return [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(([lx, ly]) => ({
+        x: x + lx * cos - ly * sin,
+        y: y + lx * sin + ly * cos,
+    }));
+}
+
+// Project a set of corners onto axis (ax, ay), return [min, max].
+function projectCorners(corners, ax, ay) {
+    const dots = corners.map(c => c.x * ax + c.y * ay);
+    return [Math.min(...dots), Math.max(...dots)];
+}
+
+// SAT overlap test for two oriented bounding boxes (each 4 corners).
+function obbsOverlap(c1, c2) {
+    const axes = [
+        { ax: c1[1].x - c1[0].x, ay: c1[1].y - c1[0].y },
+        { ax: c1[3].x - c1[0].x, ay: c1[3].y - c1[0].y },
+        { ax: c2[1].x - c2[0].x, ay: c2[1].y - c2[0].y },
+        { ax: c2[3].x - c2[0].x, ay: c2[3].y - c2[0].y },
+    ];
+    for (const { ax, ay } of axes) {
+        const [a0, a1] = projectCorners(c1, ax, ay);
+        const [b0, b1] = projectCorners(c2, ax, ay);
+        if (a1 < b0 || b1 < a0) return false;
+    }
+    return true;
+}
+
+// True if any corner of the OBB is within `buffer` px of any route segment.
+function labelNearRoute(corners, routePts, buffer) {
+    for (const corner of corners)
+        for (let i = 0; i < routePts.length - 1; i++)
+            if (closestOnSegment(routePts[i], routePts[i + 1], corner.x, corner.y).dist < buffer)
+                return true;
+    return false;
+}
+
+const ROUTE_BUFFER = 14; // px clearance between label edge and route line
+
+// Suppress labels that overlap higher-priority labels or the route line.
+// Turn labels (fromTurn:true) are anchors and are never removed.
+function resolveCollisions(positions, routePts) {
+    // Process: anchors first, then full-opacity, then dimmed.
+    const sorted = [...positions.entries()].sort(([, a], [, b]) => {
+        if (a.fromTurn !== b.fromTurn) return a.fromTurn ? -1 : 1;
+        if (a.opacity  !== b.opacity)  return b.opacity - a.opacity;
+        return a.label.length - b.label.length; // shorter names win ties
+    });
+
+    const placed = [];
+    const result = new Map();
+
+    for (const [name, pos] of sorted) {
+        if (pos.fromTurn) {
+            result.set(name, pos);
+            const { w, h } = measureLabel(pos.label);
+            placed.push(labelCorners(pos.x, pos.y, pos.angle, w, h));
+            continue;
+        }
+        const { w, h } = measureLabel(pos.label);
+        const corners = labelCorners(pos.x, pos.y, pos.angle, w, h);
+        const blocked =
+            placed.some(pc => obbsOverlap(corners, pc)) ||
+            (routePts && labelNearRoute(corners, routePts, ROUTE_BUFFER));
+        if (blocked) {
+            result.set(name, { ...pos, opacity: 0 });
+        } else {
+            placed.push(corners);
+            result.set(name, pos);
+        }
+    }
+    return result;
 }
 
 // --- Road hierarchy ---
@@ -223,21 +324,23 @@ function computeLabelPositions(map, streetCache, { pins = [], route = null } = {
             opacity = parentName ? (rank <= 5 ? 1 : DIM) : 1;
         }
 
-        positions.set(name, { x, y, angle, label: name, opacity });
+        positions.set(name, { x, y, angle, label: name, opacity, fromTurn: !!override });
     }
 
     // When a route is active, always show turn-intersection labels even if the
     // street isn't in the cache (e.g. zoomed out past the label layer).
     for (const [name, { x, y, angle }] of turnPts) {
         if (!positions.has(name))
-            positions.set(name, { x, y, angle, label: name, opacity: 1 });
+            positions.set(name, { x, y, angle, label: name, opacity: 1, fromTurn: true });
     }
 
     return positions;
 }
 
 function positionLabels(map, streetCache, labelEls, overlay, ctx) {
-    const positions = computeLabelPositions(map, streetCache, ctx);
+    const raw = computeLabelPositions(map, streetCache, ctx);
+    const routePts = ctx.route ? ctx.route.coords.map(c => map.project(c)) : null;
+    const positions = resolveCollisions(raw, routePts);
     const visible = new Set();
     for (const [key, { x, y, angle, label, opacity }] of positions) {
         visible.add(key);
