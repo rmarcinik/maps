@@ -86,8 +86,7 @@ const ROAD_LINE_LAYERS = [
     'road-secondary', 'road-primary', 'road-trunk', 'road-motorway',
 ];
 
-const SEP = '  ·  ';
-const NS  = 'http://www.w3.org/2000/svg';
+const NS = 'http://www.w3.org/2000/svg';
 
 function streetFontSize(rank) {
     if (rank <= 2) return 16;
@@ -124,11 +123,6 @@ function pLength(pts) {
     return len;
 }
 
-function repeatText(name, pathPx, unitPx) {
-    const unit = name.toUpperCase() + SEP;
-    return unit.repeat(Math.ceil(pathPx / unitPx) + 1);
-}
-
 // Pick the longest projected line segment for a street — avoids concatenating
 // disconnected tile segments into one path, which causes text to jump.
 function longestLine(lines, map) {
@@ -141,10 +135,82 @@ function longestLine(lines, map) {
     return { pts: bestPts, len: bestLen };
 }
 
-// name → { pathEl, textEl, tp } — reused across renders.
+// Returns t ∈ [0,1] along segment p1→p2 where it crosses p3→p4, or null.
+function screenSegIntersectT(p1, p2, p3, p4) {
+    const dx1 = p2.x-p1.x, dy1 = p2.y-p1.y;
+    const dx2 = p4.x-p3.x, dy2 = p4.y-p3.y;
+    const denom = dx1*dy2 - dy1*dx2;
+    if (Math.abs(denom) < 0.01) return null;
+    const dx3 = p3.x-p1.x, dy3 = p3.y-p1.y;
+    const t = (dx3*dy2 - dy3*dx2) / denom;
+    const u = (dx3*dy1 - dy3*dx1) / denom;
+    if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+    return t;
+}
+
+// Returns sorted arc-length positions (px) along mainPts where otherPtSets cross it.
+function findCrossings(mainPts, otherPtSets) {
+    const cumLen = [0];
+    for (let i = 1; i < mainPts.length; i++)
+        cumLen.push(cumLen[i-1] + Math.hypot(mainPts[i].x-mainPts[i-1].x, mainPts[i].y-mainPts[i-1].y));
+
+    const hits = [];
+    for (const other of otherPtSets) {
+        for (let mi = 0; mi < mainPts.length-1; mi++) {
+            for (let oi = 0; oi < other.length-1; oi++) {
+                const t = screenSegIntersectT(mainPts[mi], mainPts[mi+1], other[oi], other[oi+1]);
+                if (t !== null)
+                    hits.push(cumLen[mi] + t * (cumLen[mi+1] - cumLen[mi]));
+            }
+        }
+    }
+    return hits.sort((a, b) => a - b);
+}
+
+// Distributes the words of a street name into the gaps between crossings.
+// Returns [{ word, offset }] — offset is px from path start for startOffset.
+// Words flow continuously across the whole street; each gap gets as many as fit.
+const CROSSING_MARGIN = 14; // px clearance on each side of a crossing
+const WORD_SPACING    = 10; // px between consecutive words
+
+function wordPlacement(name, totalLen, crossings, fontSize) {
+    const words  = name.toUpperCase().split(' ');
+    const widths = words.map(w => measureLabel(w, fontSize).w);
+
+    const bounds = [0, ...crossings, totalLen];
+    const result = [];
+    let wi = 0;
+
+    for (let g = 0; g < bounds.length - 1; g++) {
+        const lo = bounds[g]   + (g === 0               ? 0 : CROSSING_MARGIN);
+        const hi = bounds[g+1] - (g === bounds.length-2 ? 0 : CROSSING_MARGIN);
+        let x = lo;
+        while (x < hi) {
+            const idx = wi % words.length;
+            if (x + widths[idx] > hi) break;
+            result.push({ word: words[idx], offset: x });
+            x += widths[idx] + WORD_SPACING;
+            wi++;
+        }
+    }
+    return result;
+}
+
+// name → { pathEl, id, wordEls: [{textEl, tp}] } — reused across renders.
 const _streetEls = new Map();
 let _defsEl   = null;
 let _idCounter = 0;
+
+function makeWordEl(id) {
+    const tp = document.createElementNS(NS, 'textPath');
+    tp.setAttribute('href', '#' + id);
+    const textEl = document.createElementNS(NS, 'text');
+    textEl.setAttribute('font-family', 'Inter, sans-serif');
+    textEl.setAttribute('font-weight', '900');
+    textEl.setAttribute('letter-spacing', '2');
+    textEl.appendChild(tp);
+    return { textEl, tp };
+}
 
 function renderStreets(map, streetCache, svgEl, { pins = [], route = null } = {}) {
     svgEl.style.transform = '';
@@ -156,51 +222,69 @@ function renderStreets(map, streetCache, svgEl, { pins = [], route = null } = {}
     const pinPts = pins.map(p => map.project(p.lngLat));
     const seen   = new Set();
 
-    for (const [name, { lines, rank }] of streetCache) {
+    // Project every street's longest line once — used for both rendering and
+    // crossing detection so we don't project the same geometry twice.
+    const projected = new Map(); // name → oriented screen pts
+    for (const [name, { lines }] of streetCache)
+        projected.set(name, orientPts(longestLine(lines, map).pts));
+
+    for (const [name, { rank }] of streetCache) {
         seen.add(name);
 
-        const { pts: rawPts, len } = longestLine(lines, map);
-        const pts = orientPts(rawPts);
+        const pts = projected.get(name);
+        const len = pLength(pts);
         const mid = pts[Math.floor(pts.length / 2)];
 
         const { color, opacity, fontSize } = streetStyle(name, rank, route, pinPts, mid);
-        const unit    = name.toUpperCase() + SEP;
-        const content = repeatText(name, len, measureLabel(unit, fontSize).w);
 
+        // Collect screen paths of every other street for crossing detection.
+        const others = [];
+        for (const [n, p] of projected) { if (n !== name) others.push(p); }
+        const crossings = findCrossings(pts, others);
+        const words     = wordPlacement(name, len, crossings, fontSize);
+
+        // Get or create the persistent <path> in <defs>.
         let els = _streetEls.get(name);
         if (!els) {
             const pathEl = document.createElementNS(NS, 'path');
             pathEl.setAttribute('fill', 'none');
             const id = 'sp' + _idCounter++;
             pathEl.id = id;
-
-            const tp     = document.createElementNS(NS, 'textPath');
-            tp.setAttribute('href', '#' + id);
-
-            const textEl = document.createElementNS(NS, 'text');
-            textEl.setAttribute('font-family', 'Inter, sans-serif');
-            textEl.setAttribute('font-weight', '900');
-            textEl.setAttribute('letter-spacing', '2');
-            textEl.appendChild(tp);
-
             _defsEl.appendChild(pathEl);
-            svgEl.appendChild(textEl);
-            els = { pathEl, textEl, tp };
+            els = { pathEl, id, wordEls: [] };
             _streetEls.set(name, els);
         }
 
         els.pathEl.setAttribute('d', pathD(pts));
-        els.textEl.setAttribute('fill', color);
-        els.textEl.setAttribute('fill-opacity', opacity);
-        els.textEl.setAttribute('font-size', fontSize);
-        els.tp.textContent = content;
+
+        // Grow the word element pool as needed.
+        while (els.wordEls.length < words.length) {
+            const w = makeWordEl(els.id);
+            svgEl.appendChild(w.textEl);
+            els.wordEls.push(w);
+        }
+
+        // Update visible word elements; hide the rest.
+        for (let i = 0; i < els.wordEls.length; i++) {
+            const { textEl, tp } = els.wordEls[i];
+            if (i < words.length) {
+                textEl.setAttribute('fill', color);
+                textEl.setAttribute('fill-opacity', opacity);
+                textEl.setAttribute('font-size', fontSize);
+                tp.setAttribute('startOffset', words[i].offset.toFixed(1));
+                tp.textContent = words[i].word;
+                textEl.removeAttribute('display');
+            } else {
+                textEl.setAttribute('display', 'none');
+            }
+        }
     }
 
     // Remove elements for streets no longer visible.
-    for (const [name, { pathEl, textEl }] of _streetEls) {
+    for (const [name, { pathEl, wordEls }] of _streetEls) {
         if (!seen.has(name)) {
             pathEl.remove();
-            textEl.remove();
+            for (const { textEl } of wordEls) textEl.remove();
             _streetEls.delete(name);
         }
     }
@@ -423,11 +507,11 @@ function refreshCache(map, streetCache) {
             raw.set(name, { lines, rank });
         }
     }
-    // Filter to streets whose longest projected segment meets the minimum length.
+    // Filter to streets with enough total projected length to be worth labeling.
     const next = new Map();
     for (const [name, entry] of raw) {
-        const { len } = longestLine(entry.lines, map);
-        if (len >= MIN_LABEL_PX) next.set(name, entry);
+        const totalLen = entry.lines.reduce((s, l) => s + pLength(l.map(c => map.project(c))), 0);
+        if (totalLen >= MIN_LABEL_PX) next.set(name, entry);
     }
     return next;
 }
