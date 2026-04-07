@@ -198,9 +198,9 @@ function findTightTurns(pts) {
 // Spring simulation: places word instances along a 1D path, avoiding obstacles.
 // Returns [{ word, offset }] where offset is arc-length to the word's left edge.
 const OBSTACLE_MARGIN = 20; // px exclusion radius around each obstacle, higher is more generous
-const WORD_GAP        = 6;  // minimum px between word instances, higher is more generous  
+const WORD_GAP        = 100;  // minimum px between word instances, higher is more generous  
 const DAMPING         = 0.2; // damping: slows down the simulation, lower is more viscous
-const K_OBS           = 2000; // obstacle repulsion: pushes words away from obstacles
+const K_OBS           = 1000; // obstacle repulsion: pushes words away from obstacles
 const K_WORD          = 1000; // word repulsion: pushes words away from each other, higher is more aggressive
 const K_WALL          = 1000; // wall attraction: pulls words toward the edges of the path, higher is more aggressive
 const K_EQ            = 100;  // equidistribution: pulls each word toward midpoint between neighbors, higher is more aggressive
