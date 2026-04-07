@@ -197,13 +197,14 @@ function findTightTurns(pts) {
 
 // Spring simulation: places word instances along a 1D path, avoiding obstacles.
 // Returns [{ word, offset }] where offset is arc-length to the word's left edge.
-const OBSTACLE_MARGIN = 100; // px exclusion radius around each obstacle
-const WORD_GAP        = 12;  // minimum px between word instances
-const DAMPING         = 0.88;
-const K_OBS           = 12000;
-const K_WORD          = 8000;
-const K_WALL          = 4000;
-const DT              = 0.016;
+const OBSTACLE_MARGIN = 20; // px exclusion radius around each obstacle, higher is more generous
+const WORD_GAP        = 6;  // minimum px between word instances, higher is more generous  
+const DAMPING         = 0.2; // damping: slows down the simulation, lower is more viscous
+const K_OBS           = 2000; // obstacle repulsion: pushes words away from obstacles
+const K_WORD          = 1000; // word repulsion: pushes words away from each other, higher is more aggressive
+const K_WALL          = 1000; // wall attraction: pulls words toward the edges of the path, higher is more aggressive
+const K_EQ            = 100;  // equidistribution: pulls each word toward midpoint between neighbors, higher is more aggressive
+const DT              = 0.016; // time step: how often to update the simulation, lower is more accurate
 
 // Build the initial particle list for a street, equally spaced.
 function initSpring(name, totalLen, obstacles, fontSize) {
@@ -245,11 +246,17 @@ function stepSpring(inst, totalLen, obstacles) {
             if (pen > 0) f += K_WORD * Math.sign(dx) * pen / min;
         }
 
+        // Equidistribution: pull toward midpoint between neighbors (or walls).
+        const leftBound  = i > 0                  ? inst[i-1].c + inst[i-1].hw : 0;
+        const rightBound = i < inst.length - 1    ? inst[i+1].c - inst[i+1].hw : totalLen;
+        f += K_EQ * ((leftBound + rightBound) / 2 - c);
+
         const lg = c - hw, rg = totalLen - hw - c;
         if (lg < 20) f += K_WALL / (lg * lg + 1);
         if (rg < 20) f -= K_WALL / (rg * rg + 1);
 
         inst[i].v = (inst[i].v + f * DT) * DAMPING;
+        if (Math.abs(inst[i].v) < 0.5) inst[i].v = 0;
         maxV = Math.max(maxV, Math.abs(inst[i].v));
     }
     for (const w of inst) {
