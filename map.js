@@ -811,3 +811,12 @@ document.getElementById('cm-clear').addEventListener('click', () => {
     renderStreets(map, streetCache, svgEl, ctx());
     contextMenu.hidden = true;
 });
+
+// Test API — introspect live map state from tests.py.
+window['_maps'] = {
+    map,
+    getStreetCache:  () => streetCache,
+    getActiveRoute:  () => activeRoute,
+    streetStyle,
+    streetRank,
+};
