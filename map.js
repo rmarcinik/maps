@@ -199,18 +199,28 @@ function findTightTurns(pts) {
 // Spring simulation: places word instances along a 1D path, avoiding obstacles.
 // Returns [{ word, offset }] where offset is arc-length to the word's left edge.
 const OBSTACLE_MARGIN = 20; // px exclusion radius around each obstacle, higher is more generous
-const WORD_GAP        = 100;  // minimum px between word instances, higher is more generous  
+const WORD_GAP        = 10;  // minimum px between word instances, higher is more generous
 const DAMPING         = 0.2; // damping: slows down the simulation, lower is more viscous
 const K_OBS           = 1000; // obstacle repulsion: pushes words away from obstacles
 const K_WORD          = 1000; // word repulsion: pushes words away from each other, higher is more aggressive
-const K_WALL          = 1000; // wall attraction: pulls words toward the edges of the path, higher is more aggressive
-const K_EQ            = 100;  // equidistribution: pulls each word toward midpoint between neighbors, higher is more aggressive
+const K_WALL          = 2000; // wall attraction: pulls words toward the edges of the path, higher is more aggressive
+const K_EQ            = 25;   // equidistribution: pulls each word toward midpoint between neighbors
 const K_ATTRACT       = 300;  // attraction toward crossings with important streets (rank 1–5), higher is greedier
 const DT              = 0.016; // time step: how often to update the simulation, lower is more accurate
 
+const ABBREV = {
+    NORTH: 'N', SOUTH: 'S', EAST: 'E', WEST: 'W',
+    NORTHEAST: 'NE', NORTHWEST: 'NW', SOUTHEAST: 'SE', SOUTHWEST: 'SW',
+    AVENUE: 'AVE', STREET: 'ST', BOULEVARD: 'BLVD', DRIVE: 'DR',
+    ROAD: 'RD', LANE: 'LN', COURT: 'CT', PLACE: 'PL',
+    PARKWAY: 'PKWY', HIGHWAY: 'HWY', EXPRESSWAY: 'EXPY',
+    FREEWAY: 'FWY', TRAIL: 'TRL', CIRCLE: 'CIR', TERRACE: 'TER',
+    EXTENSION: 'EXT', CROSSING: 'XING', JUNCTION: 'JCT',
+};
+
 // Build the initial particle list for a street, equally spaced.
 function initSpring(name, totalLen, obstacles, fontSize) {
-    const rawWords  = name.toUpperCase().split(' ');
+    const rawWords  = name.toUpperCase().split(' ').map(w => ABBREV[w] ?? w);
     const rawWidths = rawWords.map(w => measureLabel(w, fontSize).w);
     const cycleW    = rawWidths.reduce((s, w) => s + w, 0) + (rawWords.length - 1) * WORD_GAP;
 
@@ -244,10 +254,12 @@ function stepSpring(inst, totalLen, obstacles) {
 
         for (let j = 0; j < inst.length; j++) {
             if (i === j) continue;
-            const dx  = c - inst[j].c;
-            const min = hw + inst[j].hw + WORD_GAP;
-            const pen = min - Math.abs(dx);
-            if (pen > 0) f += K_WORD * Math.sign(dx) * pen / min;
+            const dx    = c - inst[j].c;
+            const min   = hw + inst[j].hw + WORD_GAP;
+            const absDx = Math.abs(dx);
+            // Soft long-range repulsion: full at contact, tapers to zero at 2× min distance.
+            if (absDx < min * 2)
+                f += K_WORD * Math.sign(dx) * (min * 2 - absDx) / (min * 2);
         }
 
         // Equidistribution: pull toward midpoint between neighbors (or walls).
