@@ -99,10 +99,10 @@ const ROAD_LINE_LAYERS = [
 const NS = 'http://www.w3.org/2000/svg';
 
 function streetFontSize(rank) {
-    if (rank <= 2) return 48;
-    if (rank <= 3) return 36;
-    if (rank <= 5) return 24;
-    return 18;
+    if (rank <= 2) return 36;
+    if (rank <= 3) return 24;
+    if (rank <= 5) return 18;
+    return 12;
 }
 
 function streetStyle(name, rank, route, pinPts, screenPt) {
