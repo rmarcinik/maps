@@ -1,5 +1,15 @@
 import { prepareWithSegments, walkLineRanges } from '@chenglou/pretext';
 
+// --- Font ---
+const FONT_CONTENDERS = {
+    'Bebas Neue': { weight: 400 },
+    'Archivo Black': { weight: 400 },
+    'Courier Prime': { weight: 900 },
+    'Roboto Slab': { weight: 900 }
+};
+const FONT_FAMILY = Object.keys(FONT_CONTENDERS)[3];
+const FONT_WEIGHT = FONT_CONTENDERS[FONT_FAMILY].weight;
+
 // --- Geometry helpers (pure) ---
 
 // Intersect two geographic line segments [lng,lat][]. Returns {t, u, pt} or null.
@@ -36,7 +46,7 @@ const _measureCache = new Map();
 function measureLabel(text, size = 11) {
     const key = size + '|' + text;
     if (_measureCache.has(key)) return _measureCache.get(key);
-    const p = prepareWithSegments(text, `900 ${size}px Inter`);
+    const p = prepareWithSegments(text, `${FONT_WEIGHT} ${size}px ${FONT_FAMILY}`);
     let maxW = 0;
     walkLineRanges(p, Infinity, line => { if (line.width > maxW) maxW = line.width; });
     const result = { w: maxW + LETTER_SPC * text.length };
@@ -89,10 +99,10 @@ const ROAD_LINE_LAYERS = [
 const NS = 'http://www.w3.org/2000/svg';
 
 function streetFontSize(rank) {
-    if (rank <= 2) return 16;
-    if (rank <= 3) return 13;
-    if (rank <= 5) return 11;
-    return 10;
+    if (rank <= 2) return 48;
+    if (rank <= 3) return 36;
+    if (rank <= 5) return 24;
+    return 18;
 }
 
 function streetStyle(name, rank, route, pinPts, screenPt) {
@@ -205,8 +215,8 @@ function makeWordEl(id) {
     const tp = document.createElementNS(NS, 'textPath');
     tp.setAttribute('href', '#' + id);
     const textEl = document.createElementNS(NS, 'text');
-    textEl.setAttribute('font-family', 'Inter, sans-serif');
-    textEl.setAttribute('font-weight', '900');
+    textEl.setAttribute('font-family', `${FONT_FAMILY}, sans-serif`);
+    textEl.setAttribute('font-weight', FONT_WEIGHT);
     textEl.setAttribute('letter-spacing', '2');
     textEl.appendChild(tp);
     return { textEl, tp };
