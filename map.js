@@ -158,23 +158,24 @@ function screenSegIntersectT(p1, p2, p3, p4) {
     return t;
 }
 
-// Returns sorted arc-length positions (px) along mainPts where otherPtSets cross it.
-function findCrossings(mainPts, otherPtSets) {
+// Returns sorted { pos, rank } objects along mainPts where others cross it.
+// others: [{ pts, rank }]
+function findCrossings(mainPts, others) {
     const cumLen = [0];
     for (let i = 1; i < mainPts.length; i++)
         cumLen.push(cumLen[i-1] + Math.hypot(mainPts[i].x-mainPts[i-1].x, mainPts[i].y-mainPts[i-1].y));
 
     const hits = [];
-    for (const other of otherPtSets) {
+    for (const { pts: other, rank } of others) {
         for (let mi = 0; mi < mainPts.length-1; mi++) {
             for (let oi = 0; oi < other.length-1; oi++) {
                 const t = screenSegIntersectT(mainPts[mi], mainPts[mi+1], other[oi], other[oi+1]);
                 if (t !== null)
-                    hits.push(cumLen[mi] + t * (cumLen[mi+1] - cumLen[mi]));
+                    hits.push({ pos: cumLen[mi] + t * (cumLen[mi+1] - cumLen[mi]), rank });
             }
         }
     }
-    return hits.sort((a, b) => a - b);
+    return hits.sort((a, b) => a.pos - b.pos);
 }
 
 // Arc-length positions of sharp turns (> threshold degrees) along screen pts.
@@ -190,7 +191,7 @@ function findTightTurns(pts) {
         const a2 = Math.atan2(pts[i+1].y - pts[i].y, pts[i+1].x - pts[i].x);
         let diff = Math.abs(a2 - a1) * 180 / Math.PI;
         if (diff > 180) diff = 360 - diff;
-        if (diff > TURN_THRESHOLD) turns.push(cumLen[i]);
+        if (diff > TURN_THRESHOLD) turns.push({ pos: cumLen[i], rank: Infinity });
     }
     return turns;
 }
@@ -204,6 +205,7 @@ const K_OBS           = 1000; // obstacle repulsion: pushes words away from obst
 const K_WORD          = 1000; // word repulsion: pushes words away from each other, higher is more aggressive
 const K_WALL          = 1000; // wall attraction: pulls words toward the edges of the path, higher is more aggressive
 const K_EQ            = 100;  // equidistribution: pulls each word toward midpoint between neighbors, higher is more aggressive
+const K_ATTRACT       = 300;  // attraction toward crossings with important streets (rank 1–5), higher is greedier
 const DT              = 0.016; // time step: how often to update the simulation, lower is more accurate
 
 // Build the initial particle list for a street, equally spaced.
@@ -233,9 +235,11 @@ function stepSpring(inst, totalLen, obstacles) {
         let f = 0;
 
         for (const o of obstacles) {
-            const dx  = c - o;
+            const dx  = c - o.pos;
             const pen = Math.abs(dx) - hw - OBSTACLE_MARGIN;
             f += K_OBS * Math.sign(dx) / (Math.max(pen, 1) ** 2 + 1);
+            if (o.rank <= 5)
+                f += K_ATTRACT * (o.pos - c) / (o.rank * (Math.abs(dx) + 30));
         }
 
         for (let j = 0; j < inst.length; j++) {
@@ -328,7 +332,9 @@ function renderStreets(map, streetCache, svgEl, { pins = [], route = null } = {}
         const { color, opacity, fontSize } = streetStyle(name, rank, route, pinPts, mid);
 
         const others = [];
-        for (const [n, p] of projected) { if (n !== name) others.push(p); }
+        for (const [n, p] of projected) {
+            if (n !== name) others.push({ pts: p, rank: streetCache.get(n)?.rank ?? 8 });
+        }
         const obstacles = [...findCrossings(pts, others), ...findTightTurns(pts)];
 
         // Get or create the persistent entry.
