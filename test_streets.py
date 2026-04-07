@@ -38,23 +38,36 @@ def wait_for_streets(page, timeout=15_000):
 
 
 def get_streets(page):
-    """Read all street text elements from the SVG overlay."""
-    return page.evaluate("""() =>
-        [...document.querySelectorAll('#street-svg text')].flatMap(el => {
-            const tp      = el.querySelector('textPath');
-            const content = tp?.textContent ?? '';
-            const name    = content.split('  \xb7  ')[0].trim();
-            if (!name) return [];
-            return [{ name,
-                color:         el.getAttribute('fill'),
-                opacity:       parseFloat(el.getAttribute('fill-opacity') ?? '1'),
-                fontWeight:    el.getAttribute('font-weight'),
-                fontSize:      el.getAttribute('font-size'),
-                letterSpacing: el.getAttribute('letter-spacing'),
-                content,
-            }];
-        })
-    """)
+    """Read streets from SVG overlay, grouped by path (one entry per street)."""
+    return page.evaluate("""() => {
+        const byId = {};
+        for (const el of document.querySelectorAll('#street-svg text')) {
+            if (el.getAttribute('display') === 'none') continue;
+            const tp = el.querySelector('textPath');
+            if (!tp) continue;
+            const id = (tp.getAttribute('href') ?? '').slice(1);
+            if (!id) continue;
+            if (!byId[id]) {
+                const path = document.getElementById(id);
+                const name = path?.getAttribute('data-name') ?? '';
+                if (!name) continue;
+                byId[id] = {
+                    name:          name.toUpperCase(),
+                    words:         [],
+                    color:         el.getAttribute('fill'),
+                    opacity:       parseFloat(el.getAttribute('fill-opacity') ?? '1'),
+                    fontWeight:    String(el.getAttribute('font-weight')),
+                    fontSize:      el.getAttribute('font-size'),
+                    letterSpacing: el.getAttribute('letter-spacing'),
+                };
+            }
+            const word = tp.textContent.trim();
+            if (word) byId[id].words.push(word);
+        }
+        return Object.values(byId)
+            .filter(s => s.name)
+            .map(({ words, ...rest }) => ({ ...rest, content: words.join(' ') }));
+    }""")
 
 
 def sample(streets):
@@ -69,8 +82,8 @@ def check_street(s, failures):
         failures.append(f"  {s['name']!r}: unexpected fill-opacity {s['opacity']}")
     if s['fontWeight'] != '900':
         failures.append(f"  {s['name']!r}: font-weight={s['fontWeight']!r}, want '900'")
-    if '·' not in s['content']:
-        failures.append(f"  {s['name']!r}: textPath missing separator (content truncated?)")
+    if not s['content']:
+        failures.append(f"  {s['name']!r}: no words rendered on path")
     if not s['name'].isupper():
         failures.append(f"  {s['name']!r}: name not uppercase in textPath")
 
