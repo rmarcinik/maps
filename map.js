@@ -99,10 +99,10 @@ const ROAD_LINE_LAYERS = [
 const NS = 'http://www.w3.org/2000/svg';
 
 function streetFontSize(rank) {
-    if (rank <= 2) return 36;
-    if (rank <= 3) return 24;
+    if (rank <= 2) return 24;
+    if (rank <= 3) return 20;
     if (rank <= 5) return 18;
-    return 12;
+    return 16;
 }
 
 function streetStyle(name, rank, route, pinPts, screenPt) {
@@ -158,6 +158,23 @@ function screenSegIntersectT(p1, p2, p3, p4) {
     return t;
 }
 
+// Arc-length along pts of the point geometrically closest to screen (cx, cy).
+function closestToCenter(pts, cx, cy) {
+    const cumLen = [0];
+    for (let i = 1; i < pts.length; i++)
+        cumLen.push(cumLen[i-1] + Math.hypot(pts[i].x-pts[i-1].x, pts[i].y-pts[i-1].y));
+    let bestArc = cumLen.at(-1) / 2, bestDist = Infinity;
+    for (let i = 0; i < pts.length - 1; i++) {
+        const dx = pts[i+1].x - pts[i].x, dy = pts[i+1].y - pts[i].y;
+        const segLen = Math.hypot(dx, dy);
+        if (segLen < 0.01) continue;
+        const t  = Math.max(0, Math.min(1, ((cx-pts[i].x)*dx + (cy-pts[i].y)*dy) / (segLen*segLen)));
+        const dist = Math.hypot(pts[i].x + t*dx - cx, pts[i].y + t*dy - cy);
+        if (dist < bestDist) { bestDist = dist; bestArc = cumLen[i] + t * (cumLen[i+1] - cumLen[i]); }
+    }
+    return bestArc;
+}
+
 // Returns sorted { pos, rank } objects along mainPts where others cross it.
 // others: [{ pts, rank }]
 function findCrossings(mainPts, others) {
@@ -205,7 +222,9 @@ const K_OBS           = 1000; // obstacle repulsion: pushes words away from obst
 const K_WORD          = 1000; // word repulsion: pushes words away from each other, higher is more aggressive
 const K_WALL          = 2000; // wall attraction: pulls words toward the edges of the path, higher is more aggressive
 const K_EQ            = 25;   // equidistribution: pulls each word toward midpoint between neighbors
-const K_ATTRACT       = 300;  // attraction toward crossings with important streets (rank 1–5), higher is greedier
+const K_ATTRACT       = 10;  // attraction toward crossings with important streets (rank 1–5), higher is greedier
+const K_CENTER        = 80;  // attraction toward the on-screen center of the street (must outweigh K_ATTRACT)
+const MAX_REPEATS     = 2;    // max times a street name repeats along its path
 const DT              = 0.016; // time step: how often to update the simulation, lower is more accurate
 
 const ABBREV = {
@@ -225,7 +244,7 @@ function initSpring(name, totalLen, obstacles, fontSize) {
     const cycleW    = rawWidths.reduce((s, w) => s + w, 0) + (rawWords.length - 1) * WORD_GAP;
 
     const excluded = obstacles.length * 2 * OBSTACLE_MARGIN;
-    const n = Math.max(1, Math.floor(Math.max(0, totalLen - excluded) / (cycleW + WORD_GAP)));
+    const n = Math.min(MAX_REPEATS, Math.max(1, Math.floor(Math.max(0, totalLen - excluded) / (cycleW + WORD_GAP))));
 
     const inst = [];
     for (let i = 0; i < n * rawWords.length; i++) {
@@ -238,16 +257,18 @@ function initSpring(name, totalLen, obstacles, fontSize) {
 }
 
 // Advance one integration step. Returns maxV so the caller can detect rest.
-function stepSpring(inst, totalLen, obstacles) {
+function stepSpring(inst, totalLen, obstacles, centerPos) {
     let maxV = 0;
     for (let i = 0; i < inst.length; i++) {
         const { c, hw } = inst[i];
         let f = 0;
 
         for (const o of obstacles) {
-            const dx  = c - o.pos;
-            const pen = Math.abs(dx) - hw - OBSTACLE_MARGIN;
-            f += K_OBS * Math.sign(dx) / (Math.max(pen, 1) ** 2 + 1);
+            const dx    = c - o.pos;
+            const pen   = Math.abs(dx) - hw - OBSTACLE_MARGIN;
+            // Tighter surroundings = full repulsion; open space = softer push (min 25%).
+            const scale = Math.max(0.25, 1 - (o.space ?? 0) / 300);
+            f += K_OBS * scale * Math.sign(dx) / (Math.max(pen, 1) ** 2 + 1);
             if (o.rank <= 5)
                 f += K_ATTRACT * (o.pos - c) / (o.rank * (Math.abs(dx) + 30));
         }
@@ -266,6 +287,9 @@ function stepSpring(inst, totalLen, obstacles) {
         const leftBound  = i > 0                  ? inst[i-1].c + inst[i-1].hw : 0;
         const rightBound = i < inst.length - 1    ? inst[i+1].c - inst[i+1].hw : totalLen;
         f += K_EQ * ((leftBound + rightBound) / 2 - c);
+
+        // Soft pull toward the on-screen center of this street — outweighs K_ATTRACT.
+        f += K_CENTER * (centerPos - c) / (Math.abs(centerPos - c) + 50);
 
         const lg = c - hw, rg = totalLen - hw - c;
         if (lg < 20) f += K_WALL / (lg * lg + 1);
@@ -310,7 +334,7 @@ function rafStep() {
     let anyActive = false;
     for (const els of _streetEls.values()) {
         if (!els.inst?.length) continue;
-        const maxV = stepSpring(els.inst, els.totalLen, els.obstacles);
+        const maxV = stepSpring(els.inst, els.totalLen, els.obstacles, els.centerPos);
         if (maxV > 0.5) anyActive = true;
         for (let i = 0; i < els.inst.length; i++)
             els.wordEls[i].tp.setAttribute('startOffset',
@@ -348,6 +372,12 @@ function renderStreets(map, streetCache, svgEl, { pins = [], route = null } = {}
             if (n !== name) others.push({ pts: p, rank: streetCache.get(n)?.rank ?? 8 });
         }
         const obstacles = [...findCrossings(pts, others), ...findTightTurns(pts)];
+        obstacles.sort((a, b) => a.pos - b.pos);
+        for (let oi = 0; oi < obstacles.length; oi++) {
+            const left  = oi > 0 ? obstacles[oi].pos - obstacles[oi-1].pos : obstacles[oi].pos;
+            const right = oi < obstacles.length-1 ? obstacles[oi+1].pos - obstacles[oi].pos : len - obstacles[oi].pos;
+            obstacles[oi].space = Math.min(left, right);
+        }
 
         // Get or create the persistent entry.
         let els = _streetEls.get(name);
@@ -363,7 +393,8 @@ function renderStreets(map, streetCache, svgEl, { pins = [], route = null } = {}
         }
 
         els.pathEl.setAttribute('d', pathD(pts));
-        els.obstacles = obstacles;
+        els.obstacles  = obstacles;
+        els.centerPos  = closestToCenter(pts, svgEl.clientWidth / 2, svgEl.clientHeight / 2);
 
         // Reinit particles only when the path length changes significantly.
         if (!els.inst || Math.abs(len - els.totalLen) > 10) {
