@@ -126,6 +126,31 @@ function orientPts(pts) {
     return dx < 0 ? pts.slice().reverse() : pts;
 }
 
+// Project pts onto their principal axis (PCA); return a 2-point straight path.
+// Ensures left-to-right orientation so text reads correctly.
+function straightenPath(pts) {
+    const n = pts.length;
+    let mx = 0, my = 0;
+    for (const p of pts) { mx += p.x; my += p.y; }
+    mx /= n; my /= n;
+    let sxx = 0, sxy = 0, syy = 0;
+    for (const p of pts) {
+        const dx = p.x - mx, dy = p.y - my;
+        sxx += dx*dx; sxy += dx*dy; syy += dy*dy;
+    }
+    const angle = Math.atan2(2 * sxy, sxx - syy) / 2;
+    const cos = Math.cos(angle), sin = Math.sin(angle);
+    let minT = Infinity, maxT = -Infinity;
+    for (const p of pts) {
+        const t = (p.x - mx) * cos + (p.y - my) * sin;
+        if (t < minT) minT = t;
+        if (t > maxT) maxT = t;
+    }
+    const p0 = { x: mx + cos * minT, y: my + sin * minT };
+    const p1 = { x: mx + cos * maxT, y: my + sin * maxT };
+    return p0.x <= p1.x ? [p0, p1] : [p1, p0];
+}
+
 function pLength(pts) {
     let len = 0;
     for (let i = 1; i < pts.length; i++)
@@ -221,7 +246,7 @@ const DAMPING         = 0.2; // damping: slows down the simulation, lower is mor
 const K_OBS           = 1000; // obstacle repulsion: pushes words away from obstacles
 const K_WORD          = 1000; // word repulsion: pushes words away from each other, higher is more aggressive
 const K_WALL          = 2000; // wall attraction: pulls words toward the edges of the path, higher is more aggressive
-const K_EQ            = 25;   // equidistribution: pulls each word toward midpoint between neighbors
+const K_EQ            = 40;   // equidistribution: pulls each word toward midpoint between neighbors
 const K_ATTRACT       = 10;  // attraction toward crossings with important streets (rank 1–5), higher is greedier
 const K_CENTER        = 80;  // attraction toward the on-screen center of the street (must outweigh K_ATTRACT)
 const MAX_REPEATS     = 2;    // max times a street name repeats along its path
@@ -336,9 +361,10 @@ function rafStep() {
         if (!els.inst?.length) continue;
         const maxV = stepSpring(els.inst, els.totalLen, els.obstacles, els.centerPos);
         if (maxV > 0.5) anyActive = true;
+        const scale = els.straightLen / els.totalLen;
         for (let i = 0; i < els.inst.length; i++)
             els.wordEls[i].tp.setAttribute('startOffset',
-                (els.inst[i].c - els.inst[i].hw).toFixed(1));
+                ((els.inst[i].c - els.inst[i].hw) * scale).toFixed(1));
     }
     if (anyActive) _rafId = requestAnimationFrame(rafStep);
 }
@@ -388,11 +414,13 @@ function renderStreets(map, streetCache, svgEl, { pins = [], route = null } = {}
             const id = 'sp' + _idCounter++;
             pathEl.id = id;
             _defsEl.appendChild(pathEl);
-            els = { pathEl, id, wordEls: [], inst: null, totalLen: -1, obstacles: [] };
+            els = { pathEl, id, wordEls: [], inst: null, totalLen: -1, straightLen: 0, obstacles: [] };
             _streetEls.set(name, els);
         }
 
-        els.pathEl.setAttribute('d', pathD(pts));
+        const straightPts = straightenPath(pts);
+        els.straightLen = Math.hypot(straightPts[1].x - straightPts[0].x, straightPts[1].y - straightPts[0].y);
+        els.pathEl.setAttribute('d', pathD(straightPts));
         els.obstacles  = obstacles;
         els.centerPos  = closestToCenter(pts, svgEl.clientWidth / 2, svgEl.clientHeight / 2);
 
