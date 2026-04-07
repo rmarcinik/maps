@@ -99,10 +99,10 @@ const ROAD_LINE_LAYERS = [
 const NS = 'http://www.w3.org/2000/svg';
 
 function streetFontSize(rank) {
-    if (rank <= 2) return 48;
-    if (rank <= 3) return 36;
-    if (rank <= 5) return 24;
-    return 18;
+    if (rank <= 2) return 24;
+    if (rank <= 3) return 20;
+    if (rank <= 5) return 18;
+    return 16;
 }
 
 function streetStyle(name, rank, route, pinPts, screenPt) {
@@ -124,6 +124,31 @@ function pathD(pts) {
 function orientPts(pts) {
     const dx = pts.at(-1).x - pts[0].x;
     return dx < 0 ? pts.slice().reverse() : pts;
+}
+
+// Project pts onto their principal axis (PCA); return a 2-point straight path.
+// Ensures left-to-right orientation so text reads correctly.
+function straightenPath(pts) {
+    const n = pts.length;
+    let mx = 0, my = 0;
+    for (const p of pts) { mx += p.x; my += p.y; }
+    mx /= n; my /= n;
+    let sxx = 0, sxy = 0, syy = 0;
+    for (const p of pts) {
+        const dx = p.x - mx, dy = p.y - my;
+        sxx += dx*dx; sxy += dx*dy; syy += dy*dy;
+    }
+    const angle = Math.atan2(2 * sxy, sxx - syy) / 2;
+    const cos = Math.cos(angle), sin = Math.sin(angle);
+    let minT = Infinity, maxT = -Infinity;
+    for (const p of pts) {
+        const t = (p.x - mx) * cos + (p.y - my) * sin;
+        if (t < minT) minT = t;
+        if (t > maxT) maxT = t;
+    }
+    const p0 = { x: mx + cos * minT, y: my + sin * minT };
+    const p1 = { x: mx + cos * maxT, y: my + sin * maxT };
+    return p0.x <= p1.x ? [p0, p1] : [p1, p0];
 }
 
 function pLength(pts) {
@@ -158,23 +183,41 @@ function screenSegIntersectT(p1, p2, p3, p4) {
     return t;
 }
 
-// Returns sorted arc-length positions (px) along mainPts where otherPtSets cross it.
-function findCrossings(mainPts, otherPtSets) {
+// Arc-length along pts of the point geometrically closest to screen (cx, cy).
+function closestToCenter(pts, cx, cy) {
+    const cumLen = [0];
+    for (let i = 1; i < pts.length; i++)
+        cumLen.push(cumLen[i-1] + Math.hypot(pts[i].x-pts[i-1].x, pts[i].y-pts[i-1].y));
+    let bestArc = cumLen.at(-1) / 2, bestDist = Infinity;
+    for (let i = 0; i < pts.length - 1; i++) {
+        const dx = pts[i+1].x - pts[i].x, dy = pts[i+1].y - pts[i].y;
+        const segLen = Math.hypot(dx, dy);
+        if (segLen < 0.01) continue;
+        const t  = Math.max(0, Math.min(1, ((cx-pts[i].x)*dx + (cy-pts[i].y)*dy) / (segLen*segLen)));
+        const dist = Math.hypot(pts[i].x + t*dx - cx, pts[i].y + t*dy - cy);
+        if (dist < bestDist) { bestDist = dist; bestArc = cumLen[i] + t * (cumLen[i+1] - cumLen[i]); }
+    }
+    return bestArc;
+}
+
+// Returns sorted { pos, rank } objects along mainPts where others cross it.
+// others: [{ pts, rank }]
+function findCrossings(mainPts, others) {
     const cumLen = [0];
     for (let i = 1; i < mainPts.length; i++)
         cumLen.push(cumLen[i-1] + Math.hypot(mainPts[i].x-mainPts[i-1].x, mainPts[i].y-mainPts[i-1].y));
 
     const hits = [];
-    for (const other of otherPtSets) {
+    for (const { pts: other, rank } of others) {
         for (let mi = 0; mi < mainPts.length-1; mi++) {
             for (let oi = 0; oi < other.length-1; oi++) {
                 const t = screenSegIntersectT(mainPts[mi], mainPts[mi+1], other[oi], other[oi+1]);
                 if (t !== null)
-                    hits.push(cumLen[mi] + t * (cumLen[mi+1] - cumLen[mi]));
+                    hits.push({ pos: cumLen[mi] + t * (cumLen[mi+1] - cumLen[mi]), rank });
             }
         }
     }
-    return hits.sort((a, b) => a - b);
+    return hits.sort((a, b) => a.pos - b.pos);
 }
 
 // Arc-length positions of sharp turns (> threshold degrees) along screen pts.
@@ -190,7 +233,7 @@ function findTightTurns(pts) {
         const a2 = Math.atan2(pts[i+1].y - pts[i].y, pts[i+1].x - pts[i].x);
         let diff = Math.abs(a2 - a1) * 180 / Math.PI;
         if (diff > 180) diff = 360 - diff;
-        if (diff > TURN_THRESHOLD) turns.push(cumLen[i]);
+        if (diff > TURN_THRESHOLD) turns.push({ pos: cumLen[i], rank: Infinity });
     }
     return turns;
 }
@@ -198,22 +241,35 @@ function findTightTurns(pts) {
 // Spring simulation: places word instances along a 1D path, avoiding obstacles.
 // Returns [{ word, offset }] where offset is arc-length to the word's left edge.
 const OBSTACLE_MARGIN = 20; // px exclusion radius around each obstacle, higher is more generous
-const WORD_GAP        = 100;  // minimum px between word instances, higher is more generous  
+const WORD_GAP        = 10;  // minimum px between word instances, higher is more generous
 const DAMPING         = 0.2; // damping: slows down the simulation, lower is more viscous
 const K_OBS           = 1000; // obstacle repulsion: pushes words away from obstacles
 const K_WORD          = 1000; // word repulsion: pushes words away from each other, higher is more aggressive
-const K_WALL          = 1000; // wall attraction: pulls words toward the edges of the path, higher is more aggressive
-const K_EQ            = 100;  // equidistribution: pulls each word toward midpoint between neighbors, higher is more aggressive
+const K_WALL          = 2000; // wall attraction: pulls words toward the edges of the path, higher is more aggressive
+const K_EQ            = 40;   // equidistribution: pulls each word toward midpoint between neighbors
+const K_ATTRACT       = 10;  // attraction toward crossings with important streets (rank 1–5), higher is greedier
+const K_CENTER        = 80;  // attraction toward the on-screen center of the street (must outweigh K_ATTRACT)
+const MAX_REPEATS     = 2;    // max times a street name repeats along its path
 const DT              = 0.016; // time step: how often to update the simulation, lower is more accurate
+
+const ABBREV = {
+    NORTH: 'N', SOUTH: 'S', EAST: 'E', WEST: 'W',
+    NORTHEAST: 'NE', NORTHWEST: 'NW', SOUTHEAST: 'SE', SOUTHWEST: 'SW',
+    AVENUE: 'AVE', STREET: 'ST', BOULEVARD: 'BLVD', DRIVE: 'DR',
+    ROAD: 'RD', LANE: 'LN', COURT: 'CT', PLACE: 'PL',
+    PARKWAY: 'PKWY', HIGHWAY: 'HWY', EXPRESSWAY: 'EXPY',
+    FREEWAY: 'FWY', TRAIL: 'TRL', CIRCLE: 'CIR', TERRACE: 'TER',
+    EXTENSION: 'EXT', CROSSING: 'XING', JUNCTION: 'JCT',
+};
 
 // Build the initial particle list for a street, equally spaced.
 function initSpring(name, totalLen, obstacles, fontSize) {
-    const rawWords  = name.toUpperCase().split(' ');
+    const rawWords  = name.toUpperCase().split(' ').map(w => ABBREV[w] ?? w);
     const rawWidths = rawWords.map(w => measureLabel(w, fontSize).w);
     const cycleW    = rawWidths.reduce((s, w) => s + w, 0) + (rawWords.length - 1) * WORD_GAP;
 
     const excluded = obstacles.length * 2 * OBSTACLE_MARGIN;
-    const n = Math.max(1, Math.floor(Math.max(0, totalLen - excluded) / (cycleW + WORD_GAP)));
+    const n = Math.min(MAX_REPEATS, Math.max(1, Math.floor(Math.max(0, totalLen - excluded) / (cycleW + WORD_GAP))));
 
     const inst = [];
     for (let i = 0; i < n * rawWords.length; i++) {
@@ -226,30 +282,39 @@ function initSpring(name, totalLen, obstacles, fontSize) {
 }
 
 // Advance one integration step. Returns maxV so the caller can detect rest.
-function stepSpring(inst, totalLen, obstacles) {
+function stepSpring(inst, totalLen, obstacles, centerPos) {
     let maxV = 0;
     for (let i = 0; i < inst.length; i++) {
         const { c, hw } = inst[i];
         let f = 0;
 
         for (const o of obstacles) {
-            const dx  = c - o;
-            const pen = Math.abs(dx) - hw - OBSTACLE_MARGIN;
-            f += K_OBS * Math.sign(dx) / (Math.max(pen, 1) ** 2 + 1);
+            const dx    = c - o.pos;
+            const pen   = Math.abs(dx) - hw - OBSTACLE_MARGIN;
+            // Tighter surroundings = full repulsion; open space = softer push (min 25%).
+            const scale = Math.max(0.25, 1 - (o.space ?? 0) / 300);
+            f += K_OBS * scale * Math.sign(dx) / (Math.max(pen, 1) ** 2 + 1);
+            if (o.rank <= 5)
+                f += K_ATTRACT * (o.pos - c) / (o.rank * (Math.abs(dx) + 30));
         }
 
         for (let j = 0; j < inst.length; j++) {
             if (i === j) continue;
-            const dx  = c - inst[j].c;
-            const min = hw + inst[j].hw + WORD_GAP;
-            const pen = min - Math.abs(dx);
-            if (pen > 0) f += K_WORD * Math.sign(dx) * pen / min;
+            const dx    = c - inst[j].c;
+            const min   = hw + inst[j].hw + WORD_GAP;
+            const absDx = Math.abs(dx);
+            // Soft long-range repulsion: full at contact, tapers to zero at 2× min distance.
+            if (absDx < min * 2)
+                f += K_WORD * Math.sign(dx) * (min * 2 - absDx) / (min * 2);
         }
 
         // Equidistribution: pull toward midpoint between neighbors (or walls).
         const leftBound  = i > 0                  ? inst[i-1].c + inst[i-1].hw : 0;
         const rightBound = i < inst.length - 1    ? inst[i+1].c - inst[i+1].hw : totalLen;
         f += K_EQ * ((leftBound + rightBound) / 2 - c);
+
+        // Soft pull toward the on-screen center of this street — outweighs K_ATTRACT.
+        f += K_CENTER * (centerPos - c) / (Math.abs(centerPos - c) + 50);
 
         const lg = c - hw, rg = totalLen - hw - c;
         if (lg < 20) f += K_WALL / (lg * lg + 1);
@@ -294,11 +359,12 @@ function rafStep() {
     let anyActive = false;
     for (const els of _streetEls.values()) {
         if (!els.inst?.length) continue;
-        const maxV = stepSpring(els.inst, els.totalLen, els.obstacles);
+        const maxV = stepSpring(els.inst, els.totalLen, els.obstacles, els.centerPos);
         if (maxV > 0.5) anyActive = true;
+        const scale = els.straightLen / els.totalLen;
         for (let i = 0; i < els.inst.length; i++)
             els.wordEls[i].tp.setAttribute('startOffset',
-                (els.inst[i].c - els.inst[i].hw).toFixed(1));
+                ((els.inst[i].c - els.inst[i].hw) * scale).toFixed(1));
     }
     if (anyActive) _rafId = requestAnimationFrame(rafStep);
 }
@@ -328,8 +394,16 @@ function renderStreets(map, streetCache, svgEl, { pins = [], route = null } = {}
         const { color, opacity, fontSize } = streetStyle(name, rank, route, pinPts, mid);
 
         const others = [];
-        for (const [n, p] of projected) { if (n !== name) others.push(p); }
+        for (const [n, p] of projected) {
+            if (n !== name) others.push({ pts: p, rank: streetCache.get(n)?.rank ?? 8 });
+        }
         const obstacles = [...findCrossings(pts, others), ...findTightTurns(pts)];
+        obstacles.sort((a, b) => a.pos - b.pos);
+        for (let oi = 0; oi < obstacles.length; oi++) {
+            const left  = oi > 0 ? obstacles[oi].pos - obstacles[oi-1].pos : obstacles[oi].pos;
+            const right = oi < obstacles.length-1 ? obstacles[oi+1].pos - obstacles[oi].pos : len - obstacles[oi].pos;
+            obstacles[oi].space = Math.min(left, right);
+        }
 
         // Get or create the persistent entry.
         let els = _streetEls.get(name);
@@ -340,12 +414,15 @@ function renderStreets(map, streetCache, svgEl, { pins = [], route = null } = {}
             const id = 'sp' + _idCounter++;
             pathEl.id = id;
             _defsEl.appendChild(pathEl);
-            els = { pathEl, id, wordEls: [], inst: null, totalLen: -1, obstacles: [] };
+            els = { pathEl, id, wordEls: [], inst: null, totalLen: -1, straightLen: 0, obstacles: [] };
             _streetEls.set(name, els);
         }
 
-        els.pathEl.setAttribute('d', pathD(pts));
-        els.obstacles = obstacles;
+        const straightPts = straightenPath(pts);
+        els.straightLen = Math.hypot(straightPts[1].x - straightPts[0].x, straightPts[1].y - straightPts[0].y);
+        els.pathEl.setAttribute('d', pathD(straightPts));
+        els.obstacles  = obstacles;
+        els.centerPos  = closestToCenter(pts, svgEl.clientWidth / 2, svgEl.clientHeight / 2);
 
         // Reinit particles only when the path length changes significantly.
         if (!els.inst || Math.abs(len - els.totalLen) > 10) {
