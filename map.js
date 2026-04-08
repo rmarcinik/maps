@@ -166,26 +166,9 @@ function screenSegIntersectT(p1, p2, p3, p4) {
     return t;
 }
 
-// Arc-length along pts of the point geometrically closest to screen (cx, cy).
-function closestToCenter(pts, cx, cy) {
-    const cumLen = [0];
-    for (let i = 1; i < pts.length; i++)
-        cumLen.push(cumLen[i-1] + Math.hypot(pts[i].x-pts[i-1].x, pts[i].y-pts[i-1].y));
-    let bestArc = cumLen.at(-1) / 2, bestDist = Infinity;
-    for (let i = 0; i < pts.length - 1; i++) {
-        const dx = pts[i+1].x - pts[i].x, dy = pts[i+1].y - pts[i].y;
-        const segLen = Math.hypot(dx, dy);
-        if (segLen < 0.01) continue;
-        const t  = Math.max(0, Math.min(1, ((cx-pts[i].x)*dx + (cy-pts[i].y)*dy) / (segLen*segLen)));
-        const dist = Math.hypot(pts[i].x + t*dx - cx, pts[i].y + t*dy - cy);
-        if (dist < bestDist) { bestDist = dist; bestArc = cumLen[i] + t * (cumLen[i+1] - cumLen[i]); }
-    }
-    return bestArc;
-}
 
 // --- Deterministic repetition & collisions ---
 
-const LABEL_GAP = 20;      // px between repeated labels along a path
 const LANE_STEP = 10;      // px between parallel "lanes" for collision avoidance
 const LANE_ORDER = [0, 1, -1, 2, -2]; // multiplied by LANE_STEP
 
@@ -222,39 +205,46 @@ function pickLabelText(name, maxPx, fontSize) {
 
     const candidates = [full, abbrev, noType, first, initials].filter(Boolean);
 
-    // Choose the candidate that maximizes predicted on-path fill (more repeats),
-    // rather than always preferring the longest readable label.
-    // This improves the measured coverage ratio while staying below 1.0 by design.
-    let best = null;
-    let bestFillPx = -Infinity;
+    // Pick the widest label that fits — one label per segment, so maximize fill directly.
+    let best = null, bestW = -1;
     for (const t of candidates) {
         const w = measureLabel(t, fontSize).w;
-        if (w > maxPx) continue;
-        // If the label fits once, estimate how many times it will repeat.
-        // period = label width + LABEL_GAP (mirrors renderStreets()).
-        const period = w + LABEL_GAP;
-        const pathLen = maxPx; // close enough for ranking; caller passes ~len already
-        const maxStart = pathLen - w;
-        const n = maxStart <= 0 ? 0 : (Math.floor(maxStart / period) + 1);
-        const fillPx = n * w;
-        if (fillPx > bestFillPx) {
-            bestFillPx = fillPx;
-            best = t;
-        }
+        if (w <= maxPx && w > bestW) { bestW = w; best = t; }
     }
     return best;
 }
 
-function repeatOffsets(pathLen, labelLen, period, phase) {
-    const offsets = [];
-    const maxStart = pathLen - labelLen;
-    if (maxStart <= 0) return offsets;
-    let start = phase % period;
-    if (start < 0) start += period;
-    // Ensure the first offset is not beyond the maxStart window.
-    while (start > maxStart) start -= period;
-    for (let o = start; o <= maxStart; o += period) offsets.push(o);
-    return offsets;
+function screenBbox(pts) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const p of pts) {
+        if (p.x < x0) x0 = p.x; if (p.x > x1) x1 = p.x;
+        if (p.y < y0) y0 = p.y; if (p.y > y1) y1 = p.y;
+    }
+    return { x0, y0, x1, y1 };
+}
+
+function bboxOverlap(a, b) {
+    return a.x0 <= b.x1 && a.x1 >= b.x0 && a.y0 <= b.y1 && a.y1 >= b.y0;
+}
+
+// Arc-length values along myPts where it crosses any path in otherPtsList.
+// Returns sorted array bookended by [0, ..., totalLen].
+function crossingArcs(myPts, otherPtsList) {
+    const cumLen = [0];
+    for (let i = 1; i < myPts.length; i++)
+        cumLen.push(cumLen[i-1] + Math.hypot(myPts[i].x-myPts[i-1].x, myPts[i].y-myPts[i-1].y));
+    const totalLen = cumLen.at(-1);
+    const arcSet = new Set();
+    for (const other of otherPtsList) {
+        for (let i = 0; i < myPts.length - 1; i++) {
+            for (let j = 0; j < other.length - 1; j++) {
+                const t = screenSegIntersectT(myPts[i], myPts[i+1], other[j], other[j+1]);
+                if (t !== null)
+                    arcSet.add(+(cumLen[i] + t * (cumLen[i+1] - cumLen[i])).toFixed(1));
+            }
+        }
+    }
+    return [0, ...[...arcSet].sort((a, b) => a - b), totalLen];
 }
 
 function offsetPolyline(pts, offsetPx) {
@@ -352,23 +342,30 @@ function renderStreets(map, streetCache, svgEl, { pins = [], route = null, fill 
             _streetEls.set(name, els);
         }
 
-        // Pick a label that can fit at least once on this path.
-        const labelText = pickLabelText(name, len - 8, fontSize);
-        if (!labelText) {
+        // Split path at intersections with other streets; one label per segment.
+        const myBbox = screenBbox(pts);
+        const crossPts = [];
+        for (const [n, p] of projected) {
+            if (n !== name && bboxOverlap(myBbox, screenBbox(p))) crossPts.push(p);
+        }
+        const arcs = crossingArcs(pts, crossPts);
+
+        const offsets = [];
+        const labelTexts = [];
+        for (let i = 0; i < arcs.length - 1; i++) {
+            const segStart = arcs[i];
+            const segEnd   = arcs[i + 1];
+            const segLen   = segEnd - segStart;
+            const segText  = pickLabelText(name, segLen - 4, fontSize);
+            if (!segText) continue;
+            const segW = measureLabel(segText, fontSize).w;
+            offsets.push(segStart + (segLen - segW) / 2);
+            labelTexts.push(segText);
+        }
+        if (offsets.length === 0) {
             for (const { textEl } of els.textEls) textEl.setAttribute('display', 'none');
             continue;
         }
-        const labelW = measureLabel(labelText, fontSize).w;
-        // Prefer coverage over hiding: repeat labels more densely on long streets.
-        // Major streets keep some whitespace; minor streets can pack end-to-end.
-        const gapReduction =
-            rank <= 3 ? 8 :      // primary+ : still readable
-            rank <= 5 ? 12 :     // tertiary  : denser
-            24;                  // minor+    : can pack fully
-        const gap = Math.max(0, LABEL_GAP - gapReduction);
-        const period = labelW + gap;
-        const centerPos = closestToCenter(pts, svgEl.clientWidth / 2, svgEl.clientHeight / 2);
-        const offsets = repeatOffsets(len, labelW, period, centerPos - labelW / 2);
 
         // Sync pool size exactly to offsets count (reused across frames).
         while (els.textEls.length < offsets.length) {
@@ -389,7 +386,7 @@ function renderStreets(map, streetCache, svgEl, { pins = [], route = null, fill 
                     textEl.setAttribute('fill', color);
                     textEl.setAttribute('fill-opacity', opacity);
                     textEl.setAttribute('font-size', fontSize);
-                    tp.textContent = labelText;
+                    tp.textContent = labelTexts[i];
                     tp.setAttribute('startOffset', offsets[i].toFixed(1));
                     textEl.removeAttribute('display');
                     textEl.removeAttribute('title');
