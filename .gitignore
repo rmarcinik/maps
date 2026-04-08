@@ -2,3 +2,5 @@
 /node_modules/
 maps.code-workspace
 *.png
+CLAUDE.md
+.claude/
