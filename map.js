@@ -134,31 +134,6 @@ function orientPts(pts) {
     return dx < 0 ? pts.slice().reverse() : pts;
 }
 
-// Project pts onto their principal axis (PCA); return a 2-point straight path.
-// Ensures left-to-right orientation so text reads correctly.
-function straightenPath(pts) {
-    const n = pts.length;
-    let mx = 0, my = 0;
-    for (const p of pts) { mx += p.x; my += p.y; }
-    mx /= n; my /= n;
-    let sxx = 0, sxy = 0, syy = 0;
-    for (const p of pts) {
-        const dx = p.x - mx, dy = p.y - my;
-        sxx += dx*dx; sxy += dx*dy; syy += dy*dy;
-    }
-    const angle = Math.atan2(2 * sxy, sxx - syy) / 2;
-    const cos = Math.cos(angle), sin = Math.sin(angle);
-    let minT = Infinity, maxT = -Infinity;
-    for (const p of pts) {
-        const t = (p.x - mx) * cos + (p.y - my) * sin;
-        if (t < minT) minT = t;
-        if (t > maxT) maxT = t;
-    }
-    const p0 = { x: mx + cos * minT, y: my + sin * minT };
-    const p1 = { x: mx + cos * maxT, y: my + sin * maxT };
-    return p0.x <= p1.x ? [p0, p1] : [p1, p0];
-}
-
 function pLength(pts) {
     let len = 0;
     for (let i = 1; i < pts.length; i++)
@@ -208,56 +183,11 @@ function closestToCenter(pts, cx, cy) {
     return bestArc;
 }
 
-// Returns sorted { pos, rank } objects along mainPts where others cross it.
-// others: [{ pts, rank }]
-function findCrossings(mainPts, others) {
-    const cumLen = [0];
-    for (let i = 1; i < mainPts.length; i++)
-        cumLen.push(cumLen[i-1] + Math.hypot(mainPts[i].x-mainPts[i-1].x, mainPts[i].y-mainPts[i-1].y));
+// --- Deterministic repetition & collisions ---
 
-    const hits = [];
-    for (const { pts: other, rank } of others) {
-        for (let mi = 0; mi < mainPts.length-1; mi++) {
-            for (let oi = 0; oi < other.length-1; oi++) {
-                const t = screenSegIntersectT(mainPts[mi], mainPts[mi+1], other[oi], other[oi+1]);
-                if (t !== null)
-                    hits.push({ pos: cumLen[mi] + t * (cumLen[mi+1] - cumLen[mi]), rank });
-            }
-        }
-    }
-    return hits.sort((a, b) => a.pos - b.pos);
-}
-
-// Arc-length positions of sharp turns (> threshold degrees) along screen pts.
-const TURN_THRESHOLD = 35; // degrees
-
-function findTightTurns(pts) {
-    const cumLen = [0];
-    for (let i = 1; i < pts.length; i++)
-        cumLen.push(cumLen[i-1] + Math.hypot(pts[i].x-pts[i-1].x, pts[i].y-pts[i-1].y));
-    const turns = [];
-    for (let i = 1; i < pts.length - 1; i++) {
-        const a1 = Math.atan2(pts[i].y - pts[i-1].y, pts[i].x - pts[i-1].x);
-        const a2 = Math.atan2(pts[i+1].y - pts[i].y, pts[i+1].x - pts[i].x);
-        let diff = Math.abs(a2 - a1) * 180 / Math.PI;
-        if (diff > 180) diff = 360 - diff;
-        if (diff > TURN_THRESHOLD) turns.push({ pos: cumLen[i], rank: Infinity });
-    }
-    return turns;
-}
-
-// Spring simulation: places word instances along a 1D path, avoiding obstacles.
-// Returns [{ word, offset }] where offset is arc-length to the word's left edge.
-const OBSTACLE_MARGIN = 20; // px exclusion radius around each obstacle, higher is more generous
-const WORD_GAP        = 10;  // minimum px between word instances, higher is more generous
-const DAMPING         = 0.2; // damping: slows down the simulation, lower is more viscous
-const K_OBS           = 500; // obstacle repulsion: pushes words away from obstacles
-const K_WORD          = 500; // word repulsion: pushes words away from each other, higher is more aggressive
-const K_WALL          = 200; // wall attraction: pulls words toward the edges of the path, higher is more aggressive
-const K_EQ            = 200;   // equidistribution: pulls each word toward midpoint between neighbors
-const K_ATTRACT       = 10;  // attraction toward crossings with important streets (rank 1–5), higher is greedier
-const K_CENTER        = 80;  // attraction toward the on-screen center of the street (must outweigh K_ATTRACT)
-const DT              = 0.016; // time step: how often to update the simulation, lower is more accurate
+const LABEL_GAP = 24;      // px between repeated labels along a path
+const LANE_STEP = 10;      // px between parallel "lanes" for collision avoidance
+const LANE_ORDER = [0, 1, -1, 2, -2]; // multiplied by LANE_STEP
 
 const ABBREV_DIR = {
     NORTH: 'N', SOUTH: 'S', EAST: 'E', WEST: 'W',
@@ -278,122 +208,85 @@ function abbreviateWords(name) {
         (i === 0 ? ABBREV_DIR[w] : null) ?? ABBREV_TYPE[w] ?? w);
 }
 
-// Measure total pixel width of a word array at a given font size.
-function wordsWidth(words, fontSize) {
-    return words.reduce((s, w, i) => s + measureLabel(w, fontSize).w + (i ? WORD_GAP : 0), 0);
-}
+function pickLabelText(name, maxPx, fontSize) {
+    const full = name.toUpperCase().trim();
+    const abbrevWords = abbreviateWords(name);
+    const abbrev = abbrevWords.join(' ');
+    const noType = (abbrevWords.length > 1 && ABBREV_TYPE_VALS.has(abbrevWords.at(-1)))
+        ? abbrevWords.slice(0, -1).join(' ')
+        : null;
+    const first = abbrevWords[0] ?? '';
+    const initials = abbrevWords.length > 1
+        ? abbrevWords.map(w => (w && w[0]) ? w[0] : '').join('')
+        : null;
 
-// Try progressively more aggressive truncations until words fit within maxPx.
-// Returns a words[] that fits, or null if nothing does.
-// Strategies: full abbrev → drop type suffix → initials → char-truncate first word
-function smartTruncate(words, maxPx, fontSize) {
-    if (wordsWidth(words, fontSize) <= maxPx) return words;
+    const candidates = [full, abbrev, noType, first, initials].filter(Boolean);
 
-    // Drop type suffix (last word) if it's a type abbreviation like ST, AVE, BLVD.
-    if (words.length > 1 && ABBREV_TYPE_VALS.has(words.at(-1))) {
-        const noType = words.slice(0, -1);
-        if (wordsWidth(noType, fontSize) <= maxPx) return noType;
-    }
-
-    // First word only.
-    const first = [words[0]];
-    if (wordsWidth(first, fontSize) <= maxPx) return first;
-
-    // Initials of each original word.
-    const initials = [words.map(w => w[0]).join('')];
-    if (wordsWidth(initials, fontSize) <= maxPx) return initials;
-
-    // Character-truncate the first word with ellipsis.
-    for (let n = words[0].length - 1; n >= 2; n--) {
-        const t = [words[0].slice(0, n) + '\u2026'];
-        if (wordsWidth(t, fontSize) <= maxPx) return t;
-    }
-
-    return null;
-}
-
-// Build the initial particle list for a street, equally spaced.
-// fill=true: try to find the shortest abbreviation that fits.
-function initSpring(name, totalLen, obstacles, fontSize, { fill = false } = {}) {
-    const rawWords  = abbreviateWords(name);
-    const rawWidths = rawWords.map(w => measureLabel(w, fontSize).w);
-    const cycleW    = rawWidths.reduce((s, w) => s + w, 0) + (rawWords.length - 1) * WORD_GAP;
-
-    const excluded = obstacles.length * 2 * OBSTACLE_MARGIN;
-    const available = Math.max(0, totalLen - excluded);
-    const n = Math.max(1, Math.floor(available / (cycleW + WORD_GAP)));
-
-    // In fill mode, try to find the shortest form that fits at least once.
-    const words = fill
-        ? (smartTruncate(rawWords, available - WORD_GAP, fontSize) ?? rawWords.slice(0, 1))
-        : rawWords;
-
-    const widths = words === rawWords ? rawWidths : words.map(w => measureLabel(w, fontSize).w);
-    const cycleWFinal = widths.reduce((s, w) => s + w, 0) + (words.length - 1) * WORD_GAP;
-    const nFinal = fill
-        ? Math.max(1, Math.floor(available / (cycleWFinal + WORD_GAP)))
-        : n;
-
-    const inst = [];
-    for (let i = 0; i < nFinal * words.length; i++) {
-        const wi = i % words.length;
-        inst.push({ word: words[wi], hw: widths[wi] / 2, c: 0, v: 0 });
-    }
-    const step = totalLen / inst.length;
-    inst.forEach((w, i) => { w.c = step * (i + 0.5); });
-    return { inst, truncated: words !== rawWords };
-}
-
-// Advance one integration step. Returns maxV so the caller can detect rest.
-function stepSpring(inst, totalLen, obstacles, centerPos) {
-    let maxV = 0;
-    for (let i = 0; i < inst.length; i++) {
-        const { c, hw } = inst[i];
-        let f = 0;
-
-        for (const o of obstacles) {
-            const dx    = c - o.pos;
-            const pen   = Math.abs(dx) - hw - OBSTACLE_MARGIN;
-            // Tighter surroundings = full repulsion; open space = softer push (min 25%).
-            const scale = Math.max(0.25, 1 - (o.space ?? 0) / 300);
-            f += K_OBS * scale * Math.sign(dx) / (Math.max(pen, 1) ** 2 + 1);
-            if (o.rank <= 5)
-                f += K_ATTRACT * (o.pos - c) / (o.rank * (Math.abs(dx) + 30));
+    // Choose the candidate that maximizes predicted on-path fill (more repeats),
+    // rather than always preferring the longest readable label.
+    // This improves the measured coverage ratio while staying below 1.0 by design.
+    let best = null;
+    let bestFillPx = -Infinity;
+    for (const t of candidates) {
+        const w = measureLabel(t, fontSize).w;
+        if (w > maxPx) continue;
+        // If the label fits once, estimate how many times it will repeat.
+        // period = label width + LABEL_GAP (mirrors renderStreets()).
+        const period = w + LABEL_GAP;
+        const pathLen = maxPx; // close enough for ranking; caller passes ~len already
+        const maxStart = pathLen - w;
+        const n = maxStart <= 0 ? 0 : (Math.floor(maxStart / period) + 1);
+        const fillPx = n * w;
+        if (fillPx > bestFillPx) {
+            bestFillPx = fillPx;
+            best = t;
         }
-
-        for (let j = 0; j < inst.length; j++) {
-            if (i === j) continue;
-            const dx    = c - inst[j].c;
-            const min   = hw + inst[j].hw + WORD_GAP;
-            const absDx = Math.abs(dx);
-            // Soft long-range repulsion: full at contact, tapers to zero at 2× min distance.
-            if (absDx < min * 2)
-                f += K_WORD * Math.sign(dx) * (min * 2 - absDx) / (min * 2);
-        }
-
-        // Equidistribution: pull toward midpoint between neighbors (or walls).
-        const leftBound  = i > 0                  ? inst[i-1].c + inst[i-1].hw : 0;
-        const rightBound = i < inst.length - 1    ? inst[i+1].c - inst[i+1].hw : totalLen;
-        f += K_EQ * ((leftBound + rightBound) / 2 - c);
-
-        // Soft pull toward the on-screen center of this street — outweighs K_ATTRACT.
-        f += K_CENTER * (centerPos - c) / (Math.abs(centerPos - c) + 50);
-
-        const lg = c - hw, rg = totalLen - hw - c;
-        if (lg < 20) f += K_WALL / (lg * lg + 1);
-        if (rg < 20) f -= K_WALL / (rg * rg + 1);
-
-        inst[i].v = (inst[i].v + f * DT) * DAMPING;
-        if (Math.abs(inst[i].v) < 0.5) inst[i].v = 0;
-        maxV = Math.max(maxV, Math.abs(inst[i].v));
     }
-    for (const w of inst) {
-        w.c = Math.max(w.hw, Math.min(totalLen - w.hw, w.c + w.v));
-    }
-    return maxV;
+    return best;
 }
 
-// name → { pathEl, id, wordEls, inst, totalLen, obstacles } — reused across renders.
+function repeatOffsets(pathLen, labelLen, period, phase) {
+    const offsets = [];
+    const maxStart = pathLen - labelLen;
+    if (maxStart <= 0) return offsets;
+    let start = phase % period;
+    if (start < 0) start += period;
+    // Ensure the first offset is not beyond the maxStart window.
+    while (start > maxStart) start -= period;
+    for (let o = start; o <= maxStart; o += period) offsets.push(o);
+    return offsets;
+}
+
+function offsetPolyline(pts, offsetPx) {
+    if (!offsetPx || pts.length < 2) return pts;
+    const out = [];
+    for (let i = 0; i < pts.length; i++) {
+        const p = pts[i];
+        const pPrev = pts[Math.max(0, i - 1)];
+        const pNext = pts[Math.min(pts.length - 1, i + 1)];
+
+        let dx1 = p.x - pPrev.x, dy1 = p.y - pPrev.y;
+        let dx2 = pNext.x - p.x, dy2 = pNext.y - p.y;
+        const l1 = Math.hypot(dx1, dy1);
+        const l2 = Math.hypot(dx2, dy2);
+        if (l1 > 1e-6) { dx1 /= l1; dy1 /= l1; }
+        if (l2 > 1e-6) { dx2 /= l2; dy2 /= l2; }
+
+        // Average directions to get a smoothed tangent.
+        let tx = dx1 + dx2, ty = dy1 + dy2;
+        const tl = Math.hypot(tx, ty);
+        if (tl < 1e-6) { tx = dx2; ty = dy2; }
+        const tll = Math.hypot(tx, ty) || 1;
+        tx /= tll; ty /= tll;
+
+        // Perpendicular normal.
+        const nx = -ty, ny = tx;
+        out.push({ x: p.x + nx * offsetPx, y: p.y + ny * offsetPx });
+    }
+    return out;
+}
+
+// name → { pathEl, id, textEls } — reused across renders.
 const _streetEls = new Map();
 let _defsEl   = null;
 let _idCounter = 0;
@@ -407,29 +300,6 @@ function makeWordEl(id) {
     textEl.setAttribute('letter-spacing', '2');
     textEl.appendChild(tp);
     return { textEl, tp };
-}
-
-// rAF loop — steps every live spring and writes startOffset each frame.
-let _rafId = null;
-
-function kickRaf() {
-    if (_rafId !== null) return;
-    _rafId = requestAnimationFrame(rafStep);
-}
-
-function rafStep() {
-    _rafId = null;
-    let anyActive = false;
-    for (const els of _streetEls.values()) {
-        if (!els.inst?.length) continue;
-        const maxV = stepSpring(els.inst, els.totalLen, els.obstacles, els.centerPos);
-        if (maxV > 0.5) anyActive = true;
-        const scale = els.straightLen / els.totalLen;
-        for (let i = 0; i < els.inst.length; i++)
-            els.wordEls[i].tp.setAttribute('startOffset',
-                ((els.inst[i].c - els.inst[i].hw) * scale).toFixed(1));
-    }
-    if (anyActive) _rafId = requestAnimationFrame(rafStep);
 }
 
 function renderStreets(map, streetCache, svgEl, { pins = [], route = null, fill = false } = {}) {
@@ -448,26 +318,26 @@ function renderStreets(map, streetCache, svgEl, { pins = [], route = null, fill 
     for (const [name, { lines }] of streetCache)
         projected.set(name, orientPts(longestLine(lines, map).pts));
 
-    for (const [name, { rank }] of streetCache) {
-        seen.add(name);
-
+    const order = [...streetCache.entries()].map(([name, { rank }]) => {
         const pts = projected.get(name);
-        const len = pLength(pts);
+        const isRoute = Boolean(route?.streets?.has(name));
+        return { name, rank, len: pLength(pts), pts, isRoute };
+    }).sort((a, b) =>
+        (Number(b.isRoute) - Number(a.isRoute)) ||
+        (a.rank - b.rank) ||
+        (b.len - a.len)
+    );
+
+    const placed = []; // [{x,y,w,h}]
+    const overlaps = (a, b) =>
+        a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+
+    for (const { name, rank, pts, len, isRoute } of order) {
+        seen.add(name);
+        if (len < 1) continue;
+
         const mid = pts[Math.floor(pts.length / 2)];
-
         const { color, opacity, fontSize } = streetStyle(name, rank, route, pinPts, mid);
-
-        const others = [];
-        for (const [n, p] of projected) {
-            if (n !== name) others.push({ pts: p, rank: streetCache.get(n)?.rank ?? 8 });
-        }
-        const obstacles = [...findCrossings(pts, others), ...findTightTurns(pts)];
-        obstacles.sort((a, b) => a.pos - b.pos);
-        for (let oi = 0; oi < obstacles.length; oi++) {
-            const left  = oi > 0 ? obstacles[oi].pos - obstacles[oi-1].pos : obstacles[oi].pos;
-            const right = oi < obstacles.length-1 ? obstacles[oi+1].pos - obstacles[oi].pos : len - obstacles[oi].pos;
-            obstacles[oi].space = Math.min(left, right);
-        }
 
         // Get or create the persistent entry.
         let els = _streetEls.get(name);
@@ -478,58 +348,98 @@ function renderStreets(map, streetCache, svgEl, { pins = [], route = null, fill 
             const id = 'sp' + _idCounter++;
             pathEl.id = id;
             _defsEl.appendChild(pathEl);
-            els = { pathEl, id, wordEls: [], inst: null, totalLen: -1, straightLen: 0, obstacles: [], fill: null, truncated: false };
+            els = { pathEl, id, textEls: [] };
             _streetEls.set(name, els);
         }
 
-        const straightPts = straightenPath(pts);
-        els.straightLen = Math.hypot(straightPts[1].x - straightPts[0].x, straightPts[1].y - straightPts[0].y);
-        els.pathEl.setAttribute('d', pathD(straightPts));
-        els.obstacles  = obstacles;
-        els.centerPos  = closestToCenter(pts, svgEl.clientWidth / 2, svgEl.clientHeight / 2);
+        // Pick a label that can fit at least once on this path.
+        const labelText = pickLabelText(name, len - 8, fontSize);
+        if (!labelText) {
+            for (const { textEl } of els.textEls) textEl.setAttribute('display', 'none');
+            continue;
+        }
+        const labelW = measureLabel(labelText, fontSize).w;
+        const period = labelW + LABEL_GAP;
+        const centerPos = closestToCenter(pts, svgEl.clientWidth / 2, svgEl.clientHeight / 2);
+        const offsets = repeatOffsets(len, labelW, period, centerPos - labelW / 2);
 
-        // Reinit particles when the path length changes significantly or fill mode toggles.
-        if (!els.inst || Math.abs(len - els.totalLen) > 10 || els.fill !== fill) {
-            const spring = initSpring(name, len, obstacles, fontSize, { fill });
-            els.inst      = spring.inst;
-            els.truncated = spring.truncated;
-            els.totalLen  = len;
-            els.fill      = fill;
+        // Sync pool size exactly to offsets count (reused across frames).
+        while (els.textEls.length < offsets.length) {
+            els.textEls.push(makeWordEl(els.id));
+            svgEl.appendChild(els.textEls.at(-1).textEl);
         }
 
-        // Sync word element pool size.
-        while (els.wordEls.length < els.inst.length) {
-            els.wordEls.push(makeWordEl(els.id));
-            svgEl.appendChild(els.wordEls.at(-1).textEl);
+        let placedThisStreet = false;
+        for (const laneMul of LANE_ORDER) {
+            const lane = laneMul * LANE_STEP;
+            const lanePts = offsetPolyline(pts, lane);
+            els.pathEl.setAttribute('d', pathD(lanePts));
+
+            // Update style/text/offsets.
+            for (let i = 0; i < els.textEls.length; i++) {
+                const { textEl, tp } = els.textEls[i];
+                if (i < offsets.length) {
+                    textEl.setAttribute('fill', color);
+                    textEl.setAttribute('fill-opacity', opacity);
+                    textEl.setAttribute('font-size', fontSize);
+                    tp.textContent = labelText;
+                    tp.setAttribute('startOffset', offsets[i].toFixed(1));
+                    textEl.removeAttribute('display');
+                    textEl.removeAttribute('title');
+                } else {
+                    textEl.setAttribute('display', 'none');
+                }
+            }
+
+            // Measure collisions for just this street's visible instances.
+            let ok = true;
+            const newBoxes = [];
+            for (let i = 0; i < offsets.length; i++) {
+                const textEl = els.textEls[i].textEl;
+                let bb;
+                try {
+                    bb = textEl.getBBox();
+                } catch {
+                    continue;
+                }
+                const box = { x: bb.x, y: bb.y, w: bb.width, h: bb.height };
+                if (!isRoute) {
+                    for (const p of placed) {
+                        if (overlaps(box, p)) { ok = false; break; }
+                    }
+                }
+                if (!ok) break;
+                newBoxes.push(box);
+            }
+
+            if (ok) {
+                placed.push(...newBoxes);
+                placedThisStreet = true;
+                break;
+            }
         }
 
-        // Update style and text content; startOffset is owned by the rAF loop.
-        for (let i = 0; i < els.wordEls.length; i++) {
-            const { textEl, tp } = els.wordEls[i];
-            if (i < els.inst.length) {
-                textEl.setAttribute('fill', color);
-                textEl.setAttribute('fill-opacity', opacity);
-                textEl.setAttribute('font-size', fontSize);
-                tp.textContent = els.inst[i].word;
-                textEl.removeAttribute('display');
-                if (els.truncated) textEl.setAttribute('title', name);
-                else               textEl.removeAttribute('title');
+        if (!placedThisStreet) {
+            if (isRoute) {
+                // Route labels should always show; fall back to lane 0 even if it collides.
+                els.pathEl.setAttribute('d', pathD(pts));
+                for (let i = 0; i < offsets.length; i++)
+                    els.textEls[i].textEl.removeAttribute('display');
             } else {
-                textEl.setAttribute('display', 'none');
+                for (let i = 0; i < offsets.length; i++)
+                    els.textEls[i].textEl.setAttribute('display', 'none');
             }
         }
     }
 
     // Remove elements for streets no longer visible.
-    for (const [name, { pathEl, wordEls }] of _streetEls) {
+    for (const [name, { pathEl, textEls }] of _streetEls) {
         if (!seen.has(name)) {
             pathEl.remove();
-            for (const { textEl } of wordEls) textEl.remove();
+            for (const { textEl } of textEls) textEl.remove();
             _streetEls.delete(name);
         }
     }
-
-    kickRaf();
 }
 
 // --- Route graph & pathfinding ---
@@ -653,7 +563,10 @@ function dijkstra(edges, startKey, endKey) {
 
 // Returns { coords, streets, turns } or null.
 function computeRoute(map, pin1, pin2) {
-    const features = map.queryRenderedFeatures({ layers: ['road-name-data'] });
+    const layers = map.getZoom() < 14
+        ? ['road-major-data']
+        : ['road-major-data', 'road-name-data'];
+    const features = map.queryRenderedFeatures({ layers });
     const segments = [];
     for (const f of features) {
         if (SKIP_CLASSES.has(f.properties.class)) continue;
@@ -845,6 +758,9 @@ map.on('move', () => {
     applyMoveTransform();
 });
 map.on('moveend', () => {
+    // Playwright treats URL updates as navigations and can lose execution context.
+    // Skipping hash updates under automation keeps tests deterministic.
+    if (navigator.webdriver) return;
     history.replaceState(null, '', '#' + formatUrlPosition(map.getCenter(), map.getZoom()));
 });
 

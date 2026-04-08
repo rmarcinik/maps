@@ -239,6 +239,26 @@ def test_coverage(page):
     """Text coverage: sum of word widths vs projected road length per street."""
     if not wait_for_streets(page):
         return False, "no street text elements within 15s (server up? zoom >= 14?)"
+    # Warm tile/font caches with a reload; this makes label density more stable
+    # when running `--only coverage` vs the full suite.
+    page.reload()
+    if not wait_for_streets(page):
+        return False, "no street text elements after reload"
+    # In practice, the street cache can take a moment to populate fully after the
+    # first labels appear. Wait briefly for a “full” cache so coverage is stable.
+    try:
+        # Prefer waiting on actual rendered label count, since that's what the
+        # coverage computation ultimately measures.
+        page.wait_for_function(
+            "() => document.querySelectorAll('#street-svg text').length >= 25",
+            timeout=15_000,
+        )
+        page.wait_for_function(
+            "() => (window._maps?.getStreetCache?.()?.size ?? 0) >= 20",
+            timeout=10_000,
+        )
+    except PlaywrightTimeout:
+        pass
     page.wait_for_timeout(500)
 
     results = page.evaluate("""() => {
