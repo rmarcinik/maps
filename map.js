@@ -819,5 +819,4 @@ window['_maps'] = {
     getActiveRoute:  () => activeRoute,
     getPinPts:       () => pins.map(p => map.project(p.lngLat)),
     streetStyle,
-    streetRank,
 };

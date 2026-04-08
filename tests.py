@@ -15,9 +15,8 @@
 
 import sys
 import argparse
+from collections import Counter
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
-
-# ── constants ─────────────────────────────────────────────────────────────────
 
 MIN_STREETS     = 5
 MIN_BRIGHT      = 2   # streets with rank <= 3 (primary and above)
@@ -25,7 +24,6 @@ MIN_BRIGHT      = 2   # streets with rank <= 3 (primary and above)
 MIN_HIGHLIGHTED = 2
 MAX_DIM_RATIO   = 0.85
 
-# ── shared utilities ──────────────────────────────────────────────────────────
 
 def wait_for_streets(page, timeout=15_000):
     try:
@@ -36,10 +34,6 @@ def wait_for_streets(page, timeout=15_000):
         return True
     except PlaywrightTimeout:
         return False
-
-
-def wait_for_labels(page, timeout=15_000):
-    return wait_for_streets(page, timeout)
 
 
 def place_pin(page, x, y):
@@ -98,8 +92,6 @@ def query_street_styles(page):
     }""")
 
 
-# ── tests ─────────────────────────────────────────────────────────────────────
-
 def test_streets(page):
     """Each street's SVG color/opacity matches what streetStyle() computes."""
     if not wait_for_streets(page):
@@ -128,10 +120,8 @@ def test_streets(page):
     if len(bright) < MIN_BRIGHT:
         failures.append(f"  only {len(bright)} secondary+ streets visible — need >= {MIN_BRIGHT}")
 
-    by_color = {}
-    for s in streets:
-        by_color[s['actualColor']] = by_color.get(s['actualColor'], 0) + 1
-    print(f"  streets={len(streets)} bright={len(bright)} colors={by_color}")
+    by_color = Counter(s['actualColor'] for s in streets)
+    print(f"  streets={len(streets)} bright={len(bright)} colors={dict(by_color)}")
     return not failures, failures
 
 
@@ -175,7 +165,7 @@ def test_route(page):
 
 def test_labels(page):
     """Label highlighted/dim ratio."""
-    if not wait_for_labels(page):
+    if not wait_for_streets(page):
         return False, "no visible street labels appeared within 15s (server up? zoom >= 14?)"
 
     streets = query_street_styles(page)
@@ -196,7 +186,7 @@ def test_labels(page):
 
 def test_pins(page):
     """Pin placement, route generation, cycling, and clear."""
-    if not wait_for_labels(page):
+    if not wait_for_streets(page):
         return False, "map did not load in time"
 
     pin_count = lambda: page.evaluate("() => document.querySelectorAll('.pin-marker').length")
@@ -207,20 +197,24 @@ def test_pins(page):
     failures = []
 
     place_pin(page, 400, 450)
-    if pin_count() != 1:
-        failures.append(f"after 1st pin: expected 1, got {pin_count()}")
+    n = pin_count()
+    if n != 1:
+        failures.append(f"after 1st pin: expected 1, got {n}")
 
     place_pin(page, 700, 450)
     page.wait_for_timeout(800)
-    if pin_count() != 2:
-        failures.append(f"after 2nd pin: expected 2, got {pin_count()}")
-    if route_len() < 1:
-        failures.append(f"after 2nd pin: expected route streets, got {route_len()}")
+    n, r = pin_count(), route_len()
+    if n != 2:
+        failures.append(f"after 2nd pin: expected 2, got {n}")
+    if r < 1:
+        failures.append(f"after 2nd pin: expected route streets, got {r}")
 
     place_pin(page, 550, 300)
-    if pin_count() != 2:
-        failures.append(f"after 3rd pin (cycle): expected 2, got {pin_count()}")
+    n = pin_count()
+    if n != 2:
+        failures.append(f"after 3rd pin (cycle): expected 2, got {n}")
 
+    # Open context menu to reach cm-clear (can't reuse place_pin — that clicks cm-place).
     page.evaluate("""() => {
         document.querySelector('#map canvas').dispatchEvent(
             new MouseEvent('contextmenu', {bubbles:true, cancelable:true, clientX:550, clientY:300})
@@ -229,16 +223,15 @@ def test_pins(page):
     page.wait_for_selector("#context-menu:not([hidden])", timeout=3000)
     page.click("#cm-clear")
     page.wait_for_timeout(300)
-    if pin_count() != 0:
-        failures.append(f"after clear: expected 0 pins, got {pin_count()}")
-    if route_len() != 0:
-        failures.append(f"after clear: expected empty route, got {route_len()} streets")
+    n, r = pin_count(), route_len()
+    if n != 0:
+        failures.append(f"after clear: expected 0 pins, got {n}")
+    if r != 0:
+        failures.append(f"after clear: expected empty route, got {r} streets")
 
-    print(f"  pins after clear={pin_count()} route_streets={route_len()}")
+    print(f"  pins after clear={n} route_streets={r}")
     return not failures, failures
 
-
-# ── runner ────────────────────────────────────────────────────────────────────
 
 TESTS = {
     "streets": (test_streets, 390,  844),
@@ -252,23 +245,31 @@ def run_all(url, only=None):
     names = [only] if only else list(TESTS)
     results = {}
 
+    # Group tests by viewport to share browser instances.
+    by_viewport = {}
+    for name in names:
+        fn, w, h = TESTS[name]
+        by_viewport.setdefault((w, h), []).append(name)
+
     with sync_playwright() as p:
-        for name in names:
-            fn, w, h = TESTS[name]
-            print(f"\n{name}")
+        for (w, h), group in by_viewport.items():
             browser = p.chromium.launch()
-            page    = browser.new_page(viewport={"width": w, "height": h})
-            page.goto(url)
-            passed, failures = fn(page)
+            for name in group:
+                fn, _, _ = TESTS[name]
+                print(f"\n{name}")
+                page = browser.new_page(viewport={"width": w, "height": h})
+                page.goto(url)
+                passed, failures = fn(page)
+                page.close()
+
+                if isinstance(failures, list):
+                    for f in failures:
+                        print(f"  FAIL: {f.strip()}")
+                elif failures:
+                    print(f"  FAIL: {failures}")
+
+                results[name] = passed
             browser.close()
-
-            if isinstance(failures, list):
-                for f in failures:
-                    print(f"  FAIL: {f.strip()}")
-            elif failures:
-                print(f"  FAIL: {failures}")
-
-            results[name] = passed
 
     print("\n" + "-" * 30)
     for name, passed in results.items():
