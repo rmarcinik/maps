@@ -183,7 +183,6 @@ const ABBREV_TYPE = {
     FREEWAY: 'FWY', TRAIL: 'TRL', CIRCLE: 'CIR', TERRACE: 'TER',
     EXTENSION: 'EXT', CROSSING: 'XING', JUNCTION: 'JCT',
 };
-const ABBREV_TYPE_VALS = new Set(Object.values(ABBREV_TYPE));
 
 // Abbreviate direction/type words in a street name.
 function abbreviateWords(name) {
@@ -192,26 +191,14 @@ function abbreviateWords(name) {
 }
 
 function pickLabelText(name, maxPx, fontSize) {
-    const full = name.toUpperCase().trim();
-    const abbrevWords = abbreviateWords(name);
-    const abbrev = abbrevWords.join(' ');
-    const noType = (abbrevWords.length > 1 && ABBREV_TYPE_VALS.has(abbrevWords.at(-1)))
-        ? abbrevWords.slice(0, -1).join(' ')
-        : null;
-    const first = abbrevWords[0] ?? '';
-    const initials = abbrevWords.length > 1
-        ? abbrevWords.map(w => (w && w[0]) ? w[0] : '').join('')
-        : null;
-
-    const candidates = [full, abbrev, noType, first, initials].filter(Boolean);
-
-    // Pick the widest label that fits — one label per segment, so maximize fill directly.
-    let best = null, bestW = -1;
-    for (const t of candidates) {
-        const w = measureLabel(t, fontSize).w;
-        if (w <= maxPx && w > bestW) { bestW = w; best = t; }
+    const abbrev = abbreviateWords(name).join(' ');
+    if (measureLabel(abbrev, fontSize).w <= maxPx) return abbrev;
+    // Truncate from the end with ellipsis until it fits.
+    for (let len = abbrev.length - 1; len >= 1; len--) {
+        const t = abbrev.slice(0, len).trimEnd() + '…';
+        if (measureLabel(t, fontSize).w <= maxPx) return t;
     }
-    return best;
+    return null;
 }
 
 function screenBbox(pts) {
