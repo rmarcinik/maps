@@ -21,6 +21,8 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 MIN_STREETS     = 5
 MIN_BRIGHT      = 2   # streets with rank <= 3 (primary and above)
 
+MAX_FILL_RATIO  = 1.0  # text length must not exceed road length
+
 MIN_HIGHLIGHTED = 2
 MAX_DIM_RATIO   = 0.85
 
@@ -233,11 +235,76 @@ def test_pins(page):
     return not failures, failures
 
 
+def test_coverage(page):
+    """Text coverage: sum of word widths vs projected road length per street."""
+    if not wait_for_streets(page):
+        return False, "no street text elements within 15s (server up? zoom >= 14?)"
+    page.wait_for_timeout(500)
+
+    results = page.evaluate("""() => {
+        const { map } = window._maps;
+        const svg = document.getElementById('street-svg');
+
+        // Projected path length per street from MapLibre features.
+        const streetLens = new Map();
+        for (const f of map.queryRenderedFeatures({ layers: ['road-name-data', 'road-major-data'] })) {
+            const name = f.properties.name;
+            if (!name) continue;
+            const lines = f.geometry.type === 'LineString'
+                ? [f.geometry.coordinates]
+                : f.geometry.coordinates;
+            let len = 0;
+            for (const line of lines) {
+                const pts = line.map(c => map.project(c));
+                for (let i = 1; i < pts.length; i++)
+                    len += Math.hypot(pts[i].x - pts[i-1].x, pts[i].y - pts[i-1].y);
+            }
+            streetLens.set(name, (streetLens.get(name) ?? 0) + len);
+        }
+
+        // Total rendered text length per street from SVG.
+        const textLens = new Map();
+        for (const textEl of svg.querySelectorAll('text')) {
+            if (textEl.getAttribute('display') === 'none') continue;
+            const tp = textEl.querySelector('textPath');
+            if (!tp?.textContent.trim()) continue;
+            const pathEl = document.getElementById((tp.getAttribute('href') ?? '').slice(1));
+            const name = pathEl?.getAttribute('data-name');
+            if (!name) continue;
+            textLens.set(name, (textLens.get(name) ?? 0) + textEl.getComputedTextLength());
+        }
+
+        return [...streetLens.entries()]
+            .filter(([name]) => textLens.has(name))
+            .map(([name, streetLen]) => ({
+                name,
+                streetLen: Math.round(streetLen),
+                textLen:   Math.round(textLens.get(name)),
+                ratio:     textLens.get(name) / streetLen,
+            }))
+            .sort((a, b) => b.ratio - a.ratio);
+    }""")
+
+    failures = []
+    for r in results:
+        if r['ratio'] > MAX_FILL_RATIO:
+            failures.append(
+                f"  {r['name']!r}: text={r['textLen']}px road={r['streetLen']}px ratio={r['ratio']:.2f} (overflow)"
+            )
+
+    avg = sum(r['ratio'] for r in results) / len(results) if results else 0
+    print(f"  streets={len(results)} avg_ratio={avg:.2f}")
+    for r in results:
+        print(f"    {r['ratio']:.2f}  {r['name']!r}  text={r['textLen']}px road={r['streetLen']}px")
+    return not failures, failures
+
+
 TESTS = {
-    "streets": (test_streets, 390,  844),
-    "route":   (test_route,  1280,  900),
-    "labels":  (test_labels,  390,  844),
-    "pins":    (test_pins,   1280,  900),
+    "streets":  (test_streets,  390,  844),
+    "route":    (test_route,   1280,  900),
+    "labels":   (test_labels,   390,  844),
+    "pins":     (test_pins,    1280,  900),
+    "coverage": (test_coverage, 390,  844),
 }
 
 

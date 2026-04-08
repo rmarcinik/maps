@@ -107,10 +107,10 @@ function setRoadLinesVisible(map, visible) {
 const NS = 'http://www.w3.org/2000/svg';
 
 function streetFontSize(rank) {
-    if (rank <= 2) return 24;
-    if (rank <= 3) return 20;
-    if (rank <= 5) return 18;
-    return 16;
+    if (rank <= 2) return 20;
+    if (rank <= 3) return 18;
+    if (rank <= 5) return 16;
+    return 12;
 }
 
 function streetStyle(name, rank, route, pinPts, screenPt) {
@@ -249,7 +249,7 @@ function findTightTurns(pts) {
 // Spring simulation: places word instances along a 1D path, avoiding obstacles.
 // Returns [{ word, offset }] where offset is arc-length to the word's left edge.
 const OBSTACLE_MARGIN = 20; // px exclusion radius around each obstacle, higher is more generous
-const WORD_GAP        = 2;  // minimum px between word instances, higher is more generous
+const WORD_GAP        = 10;  // minimum px between word instances, higher is more generous
 const DAMPING         = 0.2; // damping: slows down the simulation, lower is more viscous
 const K_OBS           = 500; // obstacle repulsion: pushes words away from obstacles
 const K_WORD          = 500; // word repulsion: pushes words away from each other, higher is more aggressive
@@ -257,7 +257,6 @@ const K_WALL          = 200; // wall attraction: pulls words toward the edges of
 const K_EQ            = 200;   // equidistribution: pulls each word toward midpoint between neighbors
 const K_ATTRACT       = 10;  // attraction toward crossings with important streets (rank 1–5), higher is greedier
 const K_CENTER        = 80;  // attraction toward the on-screen center of the street (must outweigh K_ATTRACT)
-const MAX_REPEATS     = 10;    // max times a street name repeats along its path
 const DT              = 0.016; // time step: how often to update the simulation, lower is more accurate
 
 const ABBREV_DIR = {
@@ -314,7 +313,7 @@ function smartTruncate(words, maxPx, fontSize) {
 }
 
 // Build the initial particle list for a street, equally spaced.
-// fill=true: fill the entire path with as many repetitions as fit (no MAX_REPEATS cap).
+// fill=true: try to find the shortest abbreviation that fits.
 function initSpring(name, totalLen, obstacles, fontSize, { fill = false } = {}) {
     const rawWords  = abbreviateWords(name);
     const rawWidths = rawWords.map(w => measureLabel(w, fontSize).w);
@@ -322,9 +321,7 @@ function initSpring(name, totalLen, obstacles, fontSize, { fill = false } = {}) 
 
     const excluded = obstacles.length * 2 * OBSTACLE_MARGIN;
     const available = Math.max(0, totalLen - excluded);
-    const n = fill
-        ? Math.max(1, Math.floor(available / (cycleW + WORD_GAP)))
-        : Math.min(MAX_REPEATS, Math.max(1, Math.floor(available / (cycleW + WORD_GAP))));
+    const n = Math.max(1, Math.floor(available / (cycleW + WORD_GAP)));
 
     // In fill mode, try to find the shortest form that fits at least once.
     const words = fill
@@ -344,7 +341,7 @@ function initSpring(name, totalLen, obstacles, fontSize, { fill = false } = {}) 
     }
     const step = totalLen / inst.length;
     inst.forEach((w, i) => { w.c = step * (i + 0.5); });
-    return inst;
+    return { inst, truncated: words !== rawWords };
 }
 
 // Advance one integration step. Returns maxV so the caller can detect rest.
@@ -481,7 +478,7 @@ function renderStreets(map, streetCache, svgEl, { pins = [], route = null, fill 
             const id = 'sp' + _idCounter++;
             pathEl.id = id;
             _defsEl.appendChild(pathEl);
-            els = { pathEl, id, wordEls: [], inst: null, totalLen: -1, straightLen: 0, obstacles: [], fill: null };
+            els = { pathEl, id, wordEls: [], inst: null, totalLen: -1, straightLen: 0, obstacles: [], fill: null, truncated: false };
             _streetEls.set(name, els);
         }
 
@@ -493,9 +490,11 @@ function renderStreets(map, streetCache, svgEl, { pins = [], route = null, fill 
 
         // Reinit particles when the path length changes significantly or fill mode toggles.
         if (!els.inst || Math.abs(len - els.totalLen) > 10 || els.fill !== fill) {
-            els.inst     = initSpring(name, len, obstacles, fontSize, { fill });
-            els.totalLen = len;
-            els.fill     = fill;
+            const spring = initSpring(name, len, obstacles, fontSize, { fill });
+            els.inst      = spring.inst;
+            els.truncated = spring.truncated;
+            els.totalLen  = len;
+            els.fill      = fill;
         }
 
         // Sync word element pool size.
@@ -513,6 +512,8 @@ function renderStreets(map, streetCache, svgEl, { pins = [], route = null, fill 
                 textEl.setAttribute('font-size', fontSize);
                 tp.textContent = els.inst[i].word;
                 textEl.removeAttribute('display');
+                if (els.truncated) textEl.setAttribute('title', name);
+                else               textEl.removeAttribute('title');
             } else {
                 textEl.setAttribute('display', 'none');
             }

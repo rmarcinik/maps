@@ -10,4 +10,4 @@ docker compose build maps --no-cache
 docker compose up
 
 ## Test
-uv run test_streets.py https://localhost/#@41.9194201,-87.7369907,12.83z
+uv run tests.py http://localhost/#@41.9194201,-87.7369907,12.83z
