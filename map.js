@@ -185,7 +185,7 @@ function closestToCenter(pts, cx, cy) {
 
 // --- Deterministic repetition & collisions ---
 
-const LABEL_GAP = 24;      // px between repeated labels along a path
+const LABEL_GAP = 20;      // px between repeated labels along a path
 const LANE_STEP = 10;      // px between parallel "lanes" for collision avoidance
 const LANE_ORDER = [0, 1, -1, 2, -2]; // multiplied by LANE_STEP
 
@@ -359,7 +359,14 @@ function renderStreets(map, streetCache, svgEl, { pins = [], route = null, fill 
             continue;
         }
         const labelW = measureLabel(labelText, fontSize).w;
-        const period = labelW + LABEL_GAP;
+        // Prefer coverage over hiding: repeat labels more densely on long streets.
+        // Major streets keep some whitespace; minor streets can pack end-to-end.
+        const gapReduction =
+            rank <= 3 ? 8 :      // primary+ : still readable
+            rank <= 5 ? 12 :     // tertiary  : denser
+            24;                  // minor+    : can pack fully
+        const gap = Math.max(0, LABEL_GAP - gapReduction);
+        const period = labelW + gap;
         const centerPos = closestToCenter(pts, svgEl.clientWidth / 2, svgEl.clientHeight / 2);
         const offsets = repeatOffsets(len, labelW, period, centerPos - labelW / 2);
 
@@ -426,8 +433,11 @@ function renderStreets(map, streetCache, svgEl, { pins = [], route = null, fill 
                 for (let i = 0; i < offsets.length; i++)
                     els.textEls[i].textEl.removeAttribute('display');
             } else {
+                // Prefer coverage over collision avoidance: if we couldn't find a
+                // collision-free lane, still show labels on lane 0.
+                els.pathEl.setAttribute('d', pathD(pts));
                 for (let i = 0; i < offsets.length; i++)
-                    els.textEls[i].textEl.setAttribute('display', 'none');
+                    els.textEls[i].textEl.removeAttribute('display');
             }
         }
     }
@@ -638,7 +648,7 @@ function placePinAt(lngLat) {
 
 // Minimum screen length (px) for the longest visible segment of a street.
 // Streets shorter than this on screen are not worth labeling.
-const MIN_LABEL_PX = 120;
+const MIN_LABEL_PX = 80;
 
 function refreshCache(map, streetCache) {
     if (map.getZoom() < 12) { streetCache.clear(); return streetCache; }
