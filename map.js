@@ -246,7 +246,7 @@ const DAMPING         = 0.2; // damping: slows down the simulation, lower is mor
 const K_OBS           = 1000; // obstacle repulsion: pushes words away from obstacles
 const K_WORD          = 1000; // word repulsion: pushes words away from each other, higher is more aggressive
 const K_WALL          = 2000; // wall attraction: pulls words toward the edges of the path, higher is more aggressive
-const K_EQ            = 40;   // equidistribution: pulls each word toward midpoint between neighbors
+const K_EQ            = 100;   // equidistribution: pulls each word toward midpoint between neighbors
 const K_ATTRACT       = 10;  // attraction toward crossings with important streets (rank 1–5), higher is greedier
 const K_CENTER        = 80;  // attraction toward the on-screen center of the street (must outweigh K_ATTRACT)
 const MAX_REPEATS     = 2;    // max times a street name repeats along its path
@@ -817,6 +817,7 @@ window['_maps'] = {
     map,
     getStreetCache:  () => streetCache,
     getActiveRoute:  () => activeRoute,
+    getPinPts:       () => pins.map(p => map.project(p.lngLat)),
     streetStyle,
     streetRank,
 };
