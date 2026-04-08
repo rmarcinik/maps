@@ -594,6 +594,51 @@ function computeRoute(map, pin1, pin2) {
     return { streets, turns };
 }
 
+// --- Coord panel ---
+
+function fmtCoord(lngLat) {
+    return `${lngLat.lat.toFixed(6)}, ${lngLat.lng.toFixed(6)}`;
+}
+
+function parseCoords(str) {
+    const parts = str.trim().split(/[\s,]+/);
+    if (parts.length < 2) return null;
+    const lat = parseFloat(parts[0]);
+    const lng = parseFloat(parts[1]);
+    if (isNaN(lat) || isNaN(lng)) return null;
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+    return { lat, lng };
+}
+
+function flashBtn(btn, label) {
+    const orig = btn.textContent;
+    btn.textContent = label;
+    setTimeout(() => { btn.textContent = orig; }, 900);
+}
+
+function updatePinList() {
+    const list = document.getElementById('pin-list');
+    list.innerHTML = '';
+    for (const pin of pins) {
+        const row = document.createElement('div');
+        row.className = 'pin-entry';
+        const label = document.createElement('span');
+        label.className = 'pin-coords';
+        label.textContent = fmtCoord(pin.lngLat);
+        const btn = document.createElement('button');
+        btn.className = 'pin-copy';
+        btn.textContent = '⧉';
+        btn.title = 'Copy coordinates';
+        btn.addEventListener('click', () => {
+            navigator.clipboard.writeText(fmtCoord(pin.lngLat))
+                .then(() => flashBtn(btn, '✓'));
+        });
+        row.appendChild(label);
+        row.appendChild(btn);
+        list.appendChild(row);
+    }
+}
+
 // --- Pin management ---
 
 function repositionPins(map) {
@@ -618,6 +663,7 @@ function placePinAt(lngLat) {
 
     repositionPins(map);
     renderStreets(map, streetCache, svgEl, { pins, route: activeRoute });
+    updatePinList();
 }
 
 // --- Street cache (slow path) ---
@@ -781,14 +827,42 @@ document.getElementById('cm-clear').addEventListener('click', () => {
     pins = [];
     activeRoute = null;
     renderStreets(map, streetCache, svgEl, ctx());
+    updatePinList();
     contextMenu.hidden = true;
 });
 
 // Press 'f' to toggle fill mode (street names replace road lines).
 document.addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT') return;
     if (e.key === 'f' && !e.metaKey && !e.ctrlKey && !e.altKey) {
         fillMode = !fillMode;
         renderStreets(map, streetCache, svgEl, ctx());
+    }
+});
+
+// --- Coord panel handlers ---
+
+document.getElementById('coord-copy').addEventListener('click', () => {
+    const btn = document.getElementById('coord-copy');
+    navigator.clipboard.writeText(fmtCoord(map.getCenter()))
+        .then(() => flashBtn(btn, '✓'));
+});
+
+document.getElementById('coord-add').addEventListener('click', () => {
+    const input = document.getElementById('coord-input');
+    const coords = parseCoords(input.value);
+    placePinAt(coords ?? map.getCenter());
+    input.value = '';
+});
+
+document.getElementById('coord-input').addEventListener('keydown', e => {
+    e.stopPropagation();
+    if (e.key === 'Enter') {
+        const coords = parseCoords(e.target.value);
+        if (coords) {
+            map.flyTo({ center: [coords.lng, coords.lat], zoom: Math.max(map.getZoom(), 14) });
+            e.target.value = '';
+        }
     }
 });
 

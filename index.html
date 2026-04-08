@@ -105,6 +105,80 @@
                 background: #222;
                 color: #fff;
             }
+
+            #coord-panel {
+                position: absolute;
+                bottom: calc(max(12px, env(safe-area-inset-bottom)) + 46px);
+                right: max(12px, env(safe-area-inset-right));
+                z-index: 5;
+                display: flex;
+                flex-direction: column;
+                gap: 1px;
+                align-items: stretch;
+            }
+
+            #coord-row {
+                display: flex;
+                gap: 1px;
+            }
+
+            #coord-input {
+                background: #111;
+                border: 1px solid #333;
+                color: #ccc;
+                font: 300 12px/1 "Inter", sans-serif;
+                letter-spacing: 0.04em;
+                padding: 6px 8px;
+                width: 148px;
+                outline: none;
+            }
+
+            #coord-input:focus { border-color: #555; }
+            #coord-input::placeholder { color: #444; }
+
+            #coord-row button {
+                background: #111;
+                border: 1px solid #333;
+                color: #888;
+                font: 300 14px/1 "Inter", sans-serif;
+                padding: 6px 9px;
+                cursor: pointer;
+            }
+
+            #coord-row button:hover { background: #222; color: #fff; }
+
+            #pin-list {
+                display: flex;
+                flex-direction: column;
+                gap: 1px;
+            }
+
+            .pin-entry {
+                display: flex;
+                gap: 1px;
+            }
+
+            .pin-coords {
+                flex: 1;
+                background: #111;
+                border: 1px solid #333;
+                color: #666;
+                font: 300 11px/1 "Inter", sans-serif;
+                letter-spacing: 0.03em;
+                padding: 5px 8px;
+                white-space: nowrap;
+            }
+
+            .pin-copy {
+                background: #111;
+                border: 1px solid #333;
+                color: #555;
+                font: 300 13px/1 "Inter", sans-serif;
+                padding: 5px 8px;
+                cursor: pointer;
+            }
+
+            .pin-copy:hover { background: #222; color: #fff; }
         </style>
     </head>
     <body>
@@ -114,6 +188,14 @@
         <div id="context-menu" hidden>
             <button id="cm-place">Place pin</button>
             <button id="cm-clear">Clear pins</button>
+        </div>
+        <div id="coord-panel">
+            <div id="coord-row">
+                <input id="coord-input" type="text" placeholder="lat, lng" spellcheck="false" autocomplete="off" />
+                <button id="coord-add" title="Add pin">+</button>
+                <button id="coord-copy" title="Copy center">⧉</button>
+            </div>
+            <div id="pin-list"></div>
         </div>
         <script type="importmap">
         { "imports": { "@chenglou/pretext": "https://unpkg.com/@chenglou/pretext@0.0.4/dist/layout.js" } }
