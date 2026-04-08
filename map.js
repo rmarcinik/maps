@@ -313,8 +313,8 @@ function renderStreets(map, streetCache, svgEl, { pins = [], route = null, fill 
         seen.add(name);
         if (len < 1) continue;
 
-        const mid = pts[Math.floor(pts.length / 2)];
-        const { color, opacity, fontSize } = streetStyle(name, rank, route, pinPts, mid);
+        const midPt = pts[Math.floor(pts.length / 2)];
+        const { color, opacity, fontSize } = streetStyle(name, rank, route, pinPts, midPt);
 
         // Get or create the persistent entry.
         let els = _streetEls.get(name);
@@ -329,30 +329,22 @@ function renderStreets(map, streetCache, svgEl, { pins = [], route = null, fill 
             _streetEls.set(name, els);
         }
 
-        // Split path at intersections with other streets; one label per segment.
-        const myBbox = screenBbox(pts);
-        const crossPts = [];
-        for (const [n, p] of projected) {
-            if (n !== name && bboxOverlap(myBbox, screenBbox(p))) crossPts.push(p);
-        }
-        const arcs = crossingArcs(pts, crossPts);
-
-        const offsets = [];
-        const labelTexts = [];
-        for (let i = 0; i < arcs.length - 1; i++) {
-            const segStart = arcs[i];
-            const segEnd   = arcs[i + 1];
-            const segLen   = segEnd - segStart;
-            const segText  = pickLabelText(name, segLen - 4, fontSize);
-            if (!segText) continue;
-            const segW = measureLabel(segText, fontSize).w;
-            offsets.push(segStart + (segLen - segW) / 2);
-            labelTexts.push(segText);
-        }
-        if (offsets.length === 0) {
+        // Use the full abbreviated name; repeat along the path with a comfortable gap.
+        const labelText = abbreviateWords(name).join(' ');
+        const labelW = measureLabel(labelText, fontSize).w;
+        if (labelW > len) {
             for (const { textEl } of els.textEls) textEl.setAttribute('display', 'none');
             continue;
         }
+        // Gap scales with rank: major roads get more breathing room.
+        const gap = rank <= 3 ? 200 : rank <= 5 ? 150 : 100;
+        const period = labelW + gap;
+        // Anchor the first label to the midpoint of the visible path.
+        const pathMid = len / 2;
+        const phase = ((pathMid - labelW / 2) % period + period) % period;
+        const offsets = [];
+        for (let o = phase; o + labelW <= len; o += period) offsets.push(o);
+        if (offsets.length === 0) offsets.push((len - labelW) / 2);
 
         // Sync pool size exactly to offsets count (reused across frames).
         while (els.textEls.length < offsets.length) {
@@ -373,7 +365,7 @@ function renderStreets(map, streetCache, svgEl, { pins = [], route = null, fill 
                     textEl.setAttribute('fill', color);
                     textEl.setAttribute('fill-opacity', opacity);
                     textEl.setAttribute('font-size', fontSize);
-                    tp.textContent = labelTexts[i];
+                    tp.textContent = labelText;
                     tp.setAttribute('startOffset', offsets[i].toFixed(1));
                     textEl.removeAttribute('display');
                     textEl.removeAttribute('title');
