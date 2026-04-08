@@ -96,6 +96,14 @@ const ROAD_LINE_LAYERS = [
     'road-secondary', 'road-primary', 'road-trunk', 'road-motorway',
 ];
 
+// Show or hide the MapLibre road stroke layers (used when fill mode replaces them with text).
+function setRoadLinesVisible(map, visible) {
+    const opacity = visible ? 1 : 0;
+    for (const layer of ROAD_LINE_LAYERS) {
+        if (map.getLayer(layer)) map.setPaintProperty(layer, 'line-opacity', opacity);
+    }
+}
+
 const NS = 'http://www.w3.org/2000/svg';
 
 function streetFontSize(rank) {
@@ -241,15 +249,15 @@ function findTightTurns(pts) {
 // Spring simulation: places word instances along a 1D path, avoiding obstacles.
 // Returns [{ word, offset }] where offset is arc-length to the word's left edge.
 const OBSTACLE_MARGIN = 20; // px exclusion radius around each obstacle, higher is more generous
-const WORD_GAP        = 10;  // minimum px between word instances, higher is more generous
+const WORD_GAP        = 2;  // minimum px between word instances, higher is more generous
 const DAMPING         = 0.2; // damping: slows down the simulation, lower is more viscous
-const K_OBS           = 1000; // obstacle repulsion: pushes words away from obstacles
-const K_WORD          = 1000; // word repulsion: pushes words away from each other, higher is more aggressive
-const K_WALL          = 2000; // wall attraction: pulls words toward the edges of the path, higher is more aggressive
-const K_EQ            = 100;   // equidistribution: pulls each word toward midpoint between neighbors
+const K_OBS           = 500; // obstacle repulsion: pushes words away from obstacles
+const K_WORD          = 500; // word repulsion: pushes words away from each other, higher is more aggressive
+const K_WALL          = 200; // wall attraction: pulls words toward the edges of the path, higher is more aggressive
+const K_EQ            = 200;   // equidistribution: pulls each word toward midpoint between neighbors
 const K_ATTRACT       = 10;  // attraction toward crossings with important streets (rank 1–5), higher is greedier
 const K_CENTER        = 80;  // attraction toward the on-screen center of the street (must outweigh K_ATTRACT)
-const MAX_REPEATS     = 2;    // max times a street name repeats along its path
+const MAX_REPEATS     = 10;    // max times a street name repeats along its path
 const DT              = 0.016; // time step: how often to update the simulation, lower is more accurate
 
 const ABBREV_DIR = {
@@ -263,21 +271,76 @@ const ABBREV_TYPE = {
     FREEWAY: 'FWY', TRAIL: 'TRL', CIRCLE: 'CIR', TERRACE: 'TER',
     EXTENSION: 'EXT', CROSSING: 'XING', JUNCTION: 'JCT',
 };
+const ABBREV_TYPE_VALS = new Set(Object.values(ABBREV_TYPE));
+
+// Abbreviate direction/type words in a street name.
+function abbreviateWords(name) {
+    return name.toUpperCase().split(' ').map((w, i) =>
+        (i === 0 ? ABBREV_DIR[w] : null) ?? ABBREV_TYPE[w] ?? w);
+}
+
+// Measure total pixel width of a word array at a given font size.
+function wordsWidth(words, fontSize) {
+    return words.reduce((s, w, i) => s + measureLabel(w, fontSize).w + (i ? WORD_GAP : 0), 0);
+}
+
+// Try progressively more aggressive truncations until words fit within maxPx.
+// Returns a words[] that fits, or null if nothing does.
+// Strategies: full abbrev → drop type suffix → initials → char-truncate first word
+function smartTruncate(words, maxPx, fontSize) {
+    if (wordsWidth(words, fontSize) <= maxPx) return words;
+
+    // Drop type suffix (last word) if it's a type abbreviation like ST, AVE, BLVD.
+    if (words.length > 1 && ABBREV_TYPE_VALS.has(words.at(-1))) {
+        const noType = words.slice(0, -1);
+        if (wordsWidth(noType, fontSize) <= maxPx) return noType;
+    }
+
+    // First word only.
+    const first = [words[0]];
+    if (wordsWidth(first, fontSize) <= maxPx) return first;
+
+    // Initials of each original word.
+    const initials = [words.map(w => w[0]).join('')];
+    if (wordsWidth(initials, fontSize) <= maxPx) return initials;
+
+    // Character-truncate the first word with ellipsis.
+    for (let n = words[0].length - 1; n >= 2; n--) {
+        const t = [words[0].slice(0, n) + '\u2026'];
+        if (wordsWidth(t, fontSize) <= maxPx) return t;
+    }
+
+    return null;
+}
 
 // Build the initial particle list for a street, equally spaced.
-function initSpring(name, totalLen, obstacles, fontSize) {
-    const rawWords  = name.toUpperCase().split(' ').map((w, i) =>
-        (i === 0 ? ABBREV_DIR[w] : null) ?? ABBREV_TYPE[w] ?? w);
+// fill=true: fill the entire path with as many repetitions as fit (no MAX_REPEATS cap).
+function initSpring(name, totalLen, obstacles, fontSize, { fill = false } = {}) {
+    const rawWords  = abbreviateWords(name);
     const rawWidths = rawWords.map(w => measureLabel(w, fontSize).w);
     const cycleW    = rawWidths.reduce((s, w) => s + w, 0) + (rawWords.length - 1) * WORD_GAP;
 
     const excluded = obstacles.length * 2 * OBSTACLE_MARGIN;
-    const n = Math.min(MAX_REPEATS, Math.max(1, Math.floor(Math.max(0, totalLen - excluded) / (cycleW + WORD_GAP))));
+    const available = Math.max(0, totalLen - excluded);
+    const n = fill
+        ? Math.max(1, Math.floor(available / (cycleW + WORD_GAP)))
+        : Math.min(MAX_REPEATS, Math.max(1, Math.floor(available / (cycleW + WORD_GAP))));
+
+    // In fill mode, try to find the shortest form that fits at least once.
+    const words = fill
+        ? (smartTruncate(rawWords, available - WORD_GAP, fontSize) ?? rawWords.slice(0, 1))
+        : rawWords;
+
+    const widths = words === rawWords ? rawWidths : words.map(w => measureLabel(w, fontSize).w);
+    const cycleWFinal = widths.reduce((s, w) => s + w, 0) + (words.length - 1) * WORD_GAP;
+    const nFinal = fill
+        ? Math.max(1, Math.floor(available / (cycleWFinal + WORD_GAP)))
+        : n;
 
     const inst = [];
-    for (let i = 0; i < n * rawWords.length; i++) {
-        const wi = i % rawWords.length;
-        inst.push({ word: rawWords[wi], hw: rawWidths[wi] / 2, c: 0, v: 0 });
+    for (let i = 0; i < nFinal * words.length; i++) {
+        const wi = i % words.length;
+        inst.push({ word: words[wi], hw: widths[wi] / 2, c: 0, v: 0 });
     }
     const step = totalLen / inst.length;
     inst.forEach((w, i) => { w.c = step * (i + 0.5); });
@@ -372,7 +435,8 @@ function rafStep() {
     if (anyActive) _rafId = requestAnimationFrame(rafStep);
 }
 
-function renderStreets(map, streetCache, svgEl, { pins = [], route = null } = {}) {
+function renderStreets(map, streetCache, svgEl, { pins = [], route = null, fill = false } = {}) {
+    setRoadLinesVisible(map, !fill);
     svgEl.style.transform = '';
     if (!_defsEl) {
         _defsEl = document.createElementNS(NS, 'defs');
@@ -417,7 +481,7 @@ function renderStreets(map, streetCache, svgEl, { pins = [], route = null } = {}
             const id = 'sp' + _idCounter++;
             pathEl.id = id;
             _defsEl.appendChild(pathEl);
-            els = { pathEl, id, wordEls: [], inst: null, totalLen: -1, straightLen: 0, obstacles: [] };
+            els = { pathEl, id, wordEls: [], inst: null, totalLen: -1, straightLen: 0, obstacles: [], fill: null };
             _streetEls.set(name, els);
         }
 
@@ -427,10 +491,11 @@ function renderStreets(map, streetCache, svgEl, { pins = [], route = null } = {}
         els.obstacles  = obstacles;
         els.centerPos  = closestToCenter(pts, svgEl.clientWidth / 2, svgEl.clientHeight / 2);
 
-        // Reinit particles only when the path length changes significantly.
-        if (!els.inst || Math.abs(len - els.totalLen) > 10) {
-            els.inst     = initSpring(name, len, obstacles, fontSize);
+        // Reinit particles when the path length changes significantly or fill mode toggles.
+        if (!els.inst || Math.abs(len - els.totalLen) > 10 || els.fill !== fill) {
+            els.inst     = initSpring(name, len, obstacles, fontSize, { fill });
             els.totalLen = len;
+            els.fill     = fill;
         }
 
         // Sync word element pool size.
@@ -742,8 +807,9 @@ const overlay = document.getElementById('street-labels');
 let streetCache = new Map();
 let pins        = [];
 let activeRoute = null;
+let fillMode    = false;
 
-const ctx = () => ({ pins, route: activeRoute });
+const ctx = () => ({ pins, route: activeRoute, fill: fillMode });
 
 // Reference state saved after each full render — used to CSS-transform the
 // frozen SVG during panning/zooming without touching the DOM.
@@ -813,6 +879,14 @@ document.getElementById('cm-clear').addEventListener('click', () => {
     activeRoute = null;
     renderStreets(map, streetCache, svgEl, ctx());
     contextMenu.hidden = true;
+});
+
+// Press 'f' to toggle fill mode (street names replace road lines).
+document.addEventListener('keydown', e => {
+    if (e.key === 'f' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        fillMode = !fillMode;
+        renderStreets(map, streetCache, svgEl, ctx());
+    }
 });
 
 // Test API — introspect live map state from tests.py.
