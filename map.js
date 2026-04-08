@@ -252,9 +252,11 @@ const K_CENTER        = 80;  // attraction toward the on-screen center of the st
 const MAX_REPEATS     = 2;    // max times a street name repeats along its path
 const DT              = 0.016; // time step: how often to update the simulation, lower is more accurate
 
-const ABBREV = {
+const ABBREV_DIR = {
     NORTH: 'N', SOUTH: 'S', EAST: 'E', WEST: 'W',
     NORTHEAST: 'NE', NORTHWEST: 'NW', SOUTHEAST: 'SE', SOUTHWEST: 'SW',
+};
+const ABBREV_TYPE = {
     AVENUE: 'AVE', STREET: 'ST', BOULEVARD: 'BLVD', DRIVE: 'DR',
     ROAD: 'RD', LANE: 'LN', COURT: 'CT', PLACE: 'PL',
     PARKWAY: 'PKWY', HIGHWAY: 'HWY', EXPRESSWAY: 'EXPY',
@@ -264,7 +266,8 @@ const ABBREV = {
 
 // Build the initial particle list for a street, equally spaced.
 function initSpring(name, totalLen, obstacles, fontSize) {
-    const rawWords  = name.toUpperCase().split(' ').map(w => ABBREV[w] ?? w);
+    const rawWords  = name.toUpperCase().split(' ').map((w, i) =>
+        (i === 0 ? ABBREV_DIR[w] : null) ?? ABBREV_TYPE[w] ?? w);
     const rawWidths = rawWords.map(w => measureLabel(w, fontSize).w);
     const cycleW    = rawWidths.reduce((s, w) => s + w, 0) + (rawWords.length - 1) * WORD_GAP;
 
