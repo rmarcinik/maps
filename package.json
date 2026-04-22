@@ -1,13 +1,12 @@
 {
 	"scripts": {
-		"build": "esbuild src/map.js --bundle --alias:maplibre-gl=./src/maplibre-shim.js --outfile=public/map.js",
-		"dev": "npm run build && wrangler dev",
-		"release": "esbuild src/map.js --bundle --alias:maplibre-gl=./src/maplibre-shim.js --minify --outfile=public/map.js && wrangler deploy"
+		"dev": "wrangler dev",
+		"release": "wrangler deploy"
 	},
 	"devDependencies": {
-		"@chenglou/pretext": "^0.0.4",
-		"esbuild": "*",
-		"maplibre-gl": "^5.23.0",
 		"wrangler": "^4"
+	},
+	"pnpm": {
+		"onlyBuiltDependencies": ["esbuild", "sharp", "workerd"]
 	}
 }
