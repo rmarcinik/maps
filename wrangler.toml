@@ -1,0 +1,9 @@
+name = "maps"
+compatibility_date = "2026-04-21"
+
+routes = [
+  { pattern = "maps.rmar.xyz", custom_domain = true }
+]
+
+[assets]
+directory = "./public"

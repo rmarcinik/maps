@@ -1,5 +1,13 @@
 {
+	"scripts": {
+		"dev": "wrangler dev",
+		"deploy": "wrangler deploy"
+	},
 	"dependencies": {
 		"@chenglou/pretext": "^0.0.4"
+	},
+	"devDependencies": {
+		"maplibre-gl": "^5.23.0",
+		"wrangler": "^3.114.17"
 	}
 }

@@ -12,6 +12,7 @@
 #
 # Example:
 #   uv run tests.py "http://localhost:8081/#@41.9434869,-87.7781155,15.59z"
+#   uv run tests.py "http://127.0.0.1:8787/#@41.9194201,-87.7369907,12.83z"
 
 import sys
 import argparse

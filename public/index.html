@@ -7,10 +7,7 @@
             content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
         />
         <title>Maps</title>
-        <link
-            rel="stylesheet"
-            href="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.css"
-        />
+        <link rel="stylesheet" href="/vendor/maplibre-gl.css" />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
         <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Archivo+Black&family=Courier+Prime:wght@700&family=Roboto+Slab:wght@900&family=Inter:wght@300&display=swap" rel="stylesheet" />
@@ -198,9 +195,9 @@
             <div id="pin-list"></div>
         </div>
         <script type="importmap">
-        { "imports": { "@chenglou/pretext": "https://unpkg.com/@chenglou/pretext@0.0.4/dist/layout.js" } }
+        { "imports": { "@chenglou/pretext": "/vendor/layout.js" } }
         </script>
-        <script src="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.js"></script>
+        <script src="/vendor/maplibre-gl.js"></script>
         <script type="module" src="map.js"></script>
     </body>
 </html>
