@@ -1,6 +1,7 @@
 .env
 node_modules/
 .wrangler/
+public/map.js
 maps.code-workspace
 *.png
 CLAUDE.md

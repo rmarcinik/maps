@@ -1,13 +1,13 @@
 {
 	"scripts": {
-		"dev": "wrangler dev",
-		"deploy": "wrangler deploy"
-	},
-	"dependencies": {
-		"@chenglou/pretext": "^0.0.4"
+		"build": "esbuild src/map.js --bundle --outfile=public/map.js",
+		"dev": "npm run build && wrangler dev",
+		"release": "esbuild src/map.js --bundle --minify --outfile=public/map.js && wrangler deploy"
 	},
 	"devDependencies": {
+		"@chenglou/pretext": "^0.0.4",
+		"esbuild": "*",
 		"maplibre-gl": "^5.23.0",
-		"wrangler": "^3.114.17"
+		"wrangler": "^4"
 	}
 }
