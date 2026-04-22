@@ -1,8 +1,8 @@
 {
 	"scripts": {
-		"build": "esbuild src/map.js --bundle --outfile=public/map.js",
+		"build": "esbuild src/map.js --bundle --alias:maplibre-gl=./src/maplibre-shim.js --outfile=public/map.js",
 		"dev": "npm run build && wrangler dev",
-		"release": "esbuild src/map.js --bundle --minify --outfile=public/map.js && wrangler deploy"
+		"release": "esbuild src/map.js --bundle --alias:maplibre-gl=./src/maplibre-shim.js --minify --outfile=public/map.js && wrangler deploy"
 	},
 	"devDependencies": {
 		"@chenglou/pretext": "^0.0.4",
